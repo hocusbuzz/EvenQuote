@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═════════════════════════════════════════════════════════════════════
+   Design tokens
+   Structure: HSL channels so Tailwind's hsl(var(--x)) composes with
+   opacity modifiers (bg-primary/50, etc.)
+   Two themes: light (default) and dark. Trigger dark via `.dark` class.
+   ═════════════════════════════════════════════════════════════════════ */
+
+@layer base {
+  :root {
+    /* Surfaces */
+    --background: 40 30% 94%;         /* cream #F5F1E8 — warmer than white */
+    --foreground: 0 0% 4%;            /* ink #0A0A0A */
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 4%;
+
+    /* Primary = ink. For big CTAs and nav. Not the accent — the accent
+       is reserved for the lime highlight to make it feel intentional. */
+    --primary: 0 0% 4%;
+    --primary-foreground: 40 30% 94%;
+
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 40 20% 90%;
+    --muted-foreground: 0 0% 35%;
+
+    /* Accent = lime #CEFF00 in HSL (74, 100%, 50%). Only used sparingly:
+       FAQ plus marks, price sticker, one hover state. */
+    --accent: 74 100% 50%;
+    --accent-foreground: 0 0% 4%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 14%;               /* Dark borders against cream = editorial */
+    --input: 0 0% 88%;
+    --ring: 0 0% 4%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 0 0% 5%;
+    --foreground: 40 30% 94%;
+    --card: 0 0% 8%;
+    --card-foreground: 40 30% 94%;
+    --popover: 0 0% 8%;
+    --popover-foreground: 40 30% 94%;
+
+    --primary: 40 30% 94%;
+    --primary-foreground: 0 0% 5%;
+
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 40 30% 94%;
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 60%;
+
+    --accent: 74 100% 50%;
+    --accent-foreground: 0 0% 5%;
+
+    --destructive: 0 62% 40%;
+    --destructive-foreground: 40 30% 94%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 40 30% 94%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: 'ss01', 'cv01';
+  }
+  /* Tighten display-type tracking for the hero's oversized numbers */
+  .display-tight {
+    letter-spacing: -0.04em;
+    line-height: 0.9;
+  }
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+   Custom utilities
+   ═════════════════════════════════════════════════════════════════════ */
+
+@layer utilities {
+  /* Editorial label — tiny, uppercase, tracked out. Used above section
+     headings. Think magazine "kicker". */
+  .label-eyebrow {
+    @apply text-xs font-mono uppercase tracking-[0.2em] text-muted-foreground;
+  }
+
+  /* Thin top-border divider used between sections for editorial feel */
+  .rule-top {
+    @apply border-t border-foreground/90;
+  }
+
+  /* Subtle noise texture for hero backgrounds — pure CSS, no image */
+  .noise {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.08'/%3E%3C/svg%3E");
+  }
+}

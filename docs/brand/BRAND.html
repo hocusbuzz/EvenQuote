@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EvenQuote — Brand one-pager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700;9..144,800;9..144,900&family=Geist:wght@300..800&family=Geist+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      --lime: #CEFF00;
+      --lime-deep: #9FCC00;
+      --cream: #F5F1E8;
+      --ink: #0A0A0A;
+      --paper: #FAF7EE;
+      --rule: rgba(10, 10, 10, 0.12);
+      --muted: rgba(10, 10, 10, 0.55);
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; }
+    body {
+      margin: 0;
+      background: var(--cream);
+      color: var(--ink);
+      font-family: 'Geist', 'Helvetica Neue', system-ui, sans-serif;
+      line-height: 1.55;
+      font-size: 16px;
+    }
+    .display {
+      font-family: 'Fraunces', Georgia, serif;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.02;
+    }
+    .mono, .eyebrow {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+    }
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 64px 32px; }
+    section { padding: 48px 0; border-top: 1px solid var(--rule); }
+    section:first-of-type { border-top: 0; padding-top: 0; }
+    h1.display { font-size: clamp(56px, 8vw, 112px); margin: 0; }
+    h2.display { font-size: clamp(36px, 4vw, 56px); margin: 0 0 24px; }
+    h3 { font-size: 18px; margin: 0 0 12px; font-weight: 600; letter-spacing: -0.005em; }
+    p { margin: 0 0 12px; max-width: 64ch; }
+    p.lede { font-size: 20px; max-width: 56ch; color: rgba(10,10,10,0.8); }
+    .grid { display: grid; gap: 24px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    @media (max-width: 720px) {
+      .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+      .wrap { padding: 32px 20px; }
+    }
+    .card {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 10px;
+      padding: 24px;
+    }
+    .card.ink { background: var(--ink); color: var(--cream); border-color: transparent; }
+    .card.ink .eyebrow { color: rgba(245,241,232,0.6); }
+    .card.lime { background: var(--lime); color: var(--ink); border-color: var(--ink); }
+
+    /* ─── Wordmark ─────────────────────────── */
+    .wordmark {
+      font-family: 'Fraunces', serif;
+      font-weight: 800;
+      font-size: clamp(56px, 10vw, 128px);
+      letter-spacing: -0.035em;
+      line-height: 0.95;
+    }
+    .wordmark .accent { color: var(--lime); }
+    .wordmark-sm {
+      font-family: 'Fraunces', serif;
+      font-weight: 700;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+    }
+    .wordmark-sm .accent { color: var(--lime); }
+    .on-ink { background: var(--ink); color: var(--cream); padding: 48px; border-radius: 10px; }
+    .on-cream { background: var(--cream); color: var(--ink); padding: 48px; border-radius: 10px; border: 1px solid var(--rule); }
+    .on-lime { background: var(--lime); color: var(--ink); padding: 48px; border-radius: 10px; border: 2px solid var(--ink); }
+    .lockup-note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+    /* ─── Logo mark ───────────────────────── */
+    .mark-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
+    .mark-tile {
+      width: 160px; height: 160px;
+      border-radius: 10px;
+      display: grid; place-items: center;
+      border: 1px solid var(--rule);
+      background: var(--paper);
+    }
+    .mark-tile.ink { background: var(--ink); border-color: transparent; }
+    .mark-tile.lime { background: var(--lime); border-color: var(--ink); }
+
+    /* ─── Palette ────────────────────────── */
+    .swatch {
+      border-radius: 10px;
+      min-height: 170px;
+      padding: 20px;
+      display: flex; flex-direction: column; justify-content: flex-end;
+      border: 1px solid var(--rule);
+    }
+    .swatch .hex { font-family: 'Geist Mono', monospace; font-size: 14px; }
+    .swatch.lime { background: var(--lime); color: var(--ink); }
+    .swatch.lime-deep { background: var(--lime-deep); color: var(--ink); }
+    .swatch.cream { background: var(--cream); color: var(--ink); }
+    .swatch.ink { background: var(--ink); color: var(--cream); border-color: transparent; }
+    .swatch.paper { background: var(--paper); color: var(--ink); }
+
+    /* ─── Type specimen ──────────────────── */
+    .specimen-display { font-size: clamp(40px, 6vw, 80px); margin: 0 0 8px; }
+    .specimen-body { font-size: 18px; line-height: 1.65; max-width: 60ch; }
+    .specimen-mono { font-size: 13px; letter-spacing: 0.04em; }
+
+    /* ─── Favicon grid ───────────────────── */
+    .favicon-grid { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; }
+    .favicon-ex {
+      border-radius: 6px;
+      display: grid; place-items: center;
+      color: var(--ink);
+      border: 1px solid var(--rule);
+      overflow: hidden;
+      background: var(--cream);
+    }
+    .favicon-ex.ink { background: var(--ink); color: var(--cream); }
+    .favicon-ex.lime { background: var(--lime); color: var(--ink); border: 1px solid var(--ink); }
+
+    /* ─── OG preview ─────────────────────── */
+    .og {
+      width: 100%;
+      aspect-ratio: 1200 / 630;
+      background: var(--ink);
+      color: var(--cream);
+      border-radius: 10px;
+      padding: 56px;
+      display: flex; flex-direction: column; justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+    .og::after {
+      content: '';
+      position: absolute;
+      right: -80px; bottom: -80px;
+      width: 360px; height: 360px;
+      background: var(--lime);
+      border-radius: 50%;
+      opacity: 0.95;
+    }
+    .og h4 {
+      font-family: 'Fraunces', serif;
+      font-weight: 800;
+      font-size: 56px;
+      line-height: 1.02;
+      letter-spacing: -0.02em;
+      margin: 0;
+      max-width: 18ch;
+      position: relative; z-index: 1;
+    }
+    .og .tag {
+      font-family: 'Geist Mono', monospace;
+      font-size: 13px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--lime);
+      position: relative; z-index: 1;
+    }
+    .og .brand {
+      position: relative; z-index: 1;
+      font-family: 'Fraunces', serif;
+      font-weight: 700;
+      font-size: 22px;
+    }
+
+    /* ─── Table ─────────────────────────── */
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+    th { font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+    code { font-family: 'Geist Mono', monospace; font-size: 13px; background: rgba(10,10,10,0.05); padding: 2px 6px; border-radius: 4px; }
+
+    ul { margin: 8px 0 0; padding-left: 20px; }
+    li { margin-bottom: 6px; }
+
+    .rule-top { border-top: 2px solid var(--ink); padding-top: 24px; }
+
+    .footer { font-size: 12px; color: var(--muted); padding-top: 40px; }
+    a { color: var(--ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- ─────────── HERO ─────────── -->
+    <section>
+      <p class="eyebrow">Brand one-pager · v0.1 · April 21, 2026</p>
+      <h1 class="display" style="margin-top: 16px;">
+        Even<span style="color: var(--lime-deep);">Quote</span>
+      </h1>
+      <p class="lede" style="margin-top: 24px;">
+        Stop chasing quotes. Start comparing them. An editorial, confident
+        brand for an AI service that does the dialing so customers don't
+        have to.
+      </p>
+    </section>
+
+    <!-- ─────────── POSITIONING ─────────── -->
+    <section>
+      <p class="eyebrow">Positioning</p>
+      <h2 class="display">We make quotes even.</h2>
+      <div class="grid grid-3">
+        <div class="card">
+          <h3>Promise</h3>
+          <p>20+ real quotes in an hour, not a week — for $9.99 flat.</p>
+        </div>
+        <div class="card">
+          <h3>Proof</h3>
+          <p>We call every local mover on your behalf. Transcripts,
+            pricing, and side-by-side reports. No phone tag.</p>
+        </div>
+        <div class="card">
+          <h3>Personality</h3>
+          <p>Editorial, direct, slightly literary. Confident without
+            SaaS snark. Serifs over sans-serif headings. Whitespace
+            over gradients.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────── WORDMARK ─────────── -->
+    <section>
+      <p class="eyebrow">Wordmark</p>
+      <h2 class="display">Even + Quote.</h2>
+      <p style="max-width: 58ch; margin-bottom: 32px;">
+        Primary wordmark: Fraunces 800, tight letter-spacing (-0.035em),
+        with the second half (<code>Quote</code>) set in the lime accent.
+        Two lockup variants — accent on ink, accent on cream — plus a
+        monochrome fallback.
+      </p>
+
+      <div class="grid grid-2">
+        <div>
+          <div class="on-cream">
+            <div class="wordmark">Even<span class="accent" style="color: var(--lime-deep);">Quote</span></div>
+          </div>
+          <p class="lockup-note">Primary · Cream background · Accent in lime-deep for AA contrast on cream</p>
+        </div>
+        <div>
+          <div class="on-ink">
+            <div class="wordmark" style="color: var(--cream);">Even<span class="accent">Quote</span></div>
+          </div>
+          <p class="lockup-note">Reverse · Ink background · Accent in lime</p>
+        </div>
+        <div>
+          <div class="on-lime">
+            <div class="wordmark" style="color: var(--ink);">Even<span style="color: var(--ink);">Quote</span></div>
+          </div>
+          <p class="lockup-note">Accent field · Lime background · All-ink wordmark (no accent split — lime does the work)</p>
+        </div>
+        <div>
+          <div class="on-cream">
+            <div class="wordmark" style="color: var(--ink);">EvenQuote</div>
+          </div>
+          <p class="lockup-note">Monochrome · For single-color print, favicons at tiny sizes, embroidery</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────── LOGO MARK ─────────── -->
+    <section>
+      <p class="eyebrow">Logo mark</p>
+      <h2 class="display">Two equals, a single phone.</h2>
+      <p style="max-width: 58ch; margin-bottom: 32px;">
+        The mark reads two ways. Seen as a monogram it's an
+        <strong>E+Q</strong> locked into a square. Seen as a symbol it's
+        <strong>two equals-lines stacked</strong> — the "even" of EvenQuote.
+        Works as a favicon at 16px, as a sticker at 2&quot;, and as an
+        app-icon rounded square.
+      </p>
+
+      <div class="mark-row">
+        <!-- Concept A: two equals bars in lime on ink, the "even" mark -->
+        <div>
+          <div class="mark-tile ink">
+            <svg width="90" height="90" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="EvenQuote mark">
+              <rect x="12" y="28" width="66" height="10" rx="2" fill="#CEFF00"/>
+              <rect x="12" y="50" width="66" height="10" rx="2" fill="#CEFF00"/>
+            </svg>
+          </div>
+          <p class="lockup-note"><strong>A. "Even" bars</strong> — literal, scalable, universally legible. Default primary mark.</p>
+        </div>
+        <!-- Concept B: "=Q" ligature -->
+        <div>
+          <div class="mark-tile">
+            <svg width="90" height="90" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="EvenQuote monogram =Q">
+              <rect x="8" y="30" width="32" height="8" rx="1.5" fill="#0A0A0A"/>
+              <rect x="8" y="52" width="32" height="8" rx="1.5" fill="#0A0A0A"/>
+              <circle cx="62" cy="45" r="18" stroke="#0A0A0A" stroke-width="8" fill="none"/>
+              <path d="M66 52 L82 68" stroke="#0A0A0A" stroke-width="8" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <p class="lockup-note"><strong>B. "=Q" ligature</strong> — literal "even quote". Slightly clever. Use for merch/stickers.</p>
+        </div>
+        <!-- Concept C: Quote mark + balance -->
+        <div>
+          <div class="mark-tile lime">
+            <svg width="90" height="90" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="EvenQuote balance mark">
+              <!-- Open quote -->
+              <path d="M22 32 C22 27, 26 22, 32 22 L32 30 C28 30, 28 34, 28 34 L28 44 L22 44 Z" fill="#0A0A0A"/>
+              <path d="M40 32 C40 27, 44 22, 50 22 L50 30 C46 30, 46 34, 46 34 L46 44 L40 44 Z" fill="#0A0A0A"/>
+              <!-- Even bar -->
+              <rect x="18" y="56" width="54" height="7" rx="1.5" fill="#0A0A0A"/>
+              <rect x="18" y="68" width="54" height="7" rx="1.5" fill="#0A0A0A"/>
+            </svg>
+          </div>
+          <p class="lockup-note"><strong>C. Quote + even</strong> — quotation marks on top, equal bars below. Narrative-forward.</p>
+        </div>
+      </div>
+      <p style="margin-top: 32px; max-width: 60ch;">
+        <strong>Recommendation:</strong> Ship with <strong>A</strong> as the
+        primary mark. It's the cheapest to render at every size, reads
+        unambiguously as "even", and pairs with the Fraunces wordmark
+        without fighting it. B and C are retained for merch/editorial
+        applications where more personality is welcome.
+      </p>
+    </section>
+
+    <!-- ─────────── PALETTE ─────────── -->
+    <section>
+      <p class="eyebrow">Palette</p>
+      <h2 class="display">Three colors. No gradients.</h2>
+      <p style="max-width: 58ch; margin-bottom: 32px;">
+        Ink, cream, lime. The palette is deliberately constrained — any
+        additional hue competes with the accent and dilutes the editorial
+        tone. Grays are produced via ink-with-alpha, not new tokens.
+      </p>
+
+      <div class="grid grid-4">
+        <div class="swatch ink">
+          <div>
+            <p class="eyebrow" style="color: rgba(245,241,232,0.6);">Primary text · Backgrounds</p>
+            <h3 style="color: var(--cream);">Ink</h3>
+            <p class="hex">#0A0A0A</p>
+          </div>
+        </div>
+        <div class="swatch cream">
+          <div>
+            <p class="eyebrow">Page surface</p>
+            <h3>Cream</h3>
+            <p class="hex">#F5F1E8</p>
+          </div>
+        </div>
+        <div class="swatch lime">
+          <div>
+            <p class="eyebrow">Accent · CTA</p>
+            <h3>Lime</h3>
+            <p class="hex">#CEFF00</p>
+          </div>
+        </div>
+        <div class="swatch lime-deep">
+          <div>
+            <p class="eyebrow">Hover · Accent on cream</p>
+            <h3>Lime Deep</h3>
+            <p class="hex">#9FCC00</p>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top: 32px;">
+        <table>
+          <thead>
+            <tr><th>Token</th><th>Hex</th><th>Use</th><th>Avoid</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ink</code></td>
+              <td><code>#0A0A0A</code></td>
+              <td>Body text. Dark surfaces. Borders on CTA.</td>
+              <td>Pure <code>#000</code> — too harsh against cream.</td>
+            </tr>
+            <tr>
+              <td><code>cream</code></td>
+              <td><code>#F5F1E8</code></td>
+              <td>Page background. Cards. Reverse text on ink.</td>
+              <td>Pure <code>#fff</code> — reads as stock template.</td>
+            </tr>
+            <tr>
+              <td><code>lime</code></td>
+              <td><code>#CEFF00</code></td>
+              <td>Accent panels, primary CTAs on ink, marketing graphics.</td>
+              <td>Large bodies of type in lime — illegible on cream.</td>
+            </tr>
+            <tr>
+              <td><code>lime-deep</code></td>
+              <td><code>#9FCC00</code></td>
+              <td>Hover states. Wordmark accent when set on cream (AA contrast).</td>
+              <td>CTAs — too subdued, use lime on ink instead.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────── TYPOGRAPHY ─────────── -->
+    <section>
+      <p class="eyebrow">Typography</p>
+      <h2 class="display">Fraunces for voice. Geist for clarity.</h2>
+
+      <div class="grid grid-2" style="margin-top: 24px;">
+        <div class="card">
+          <p class="eyebrow">Display · Fraunces · 700–900</p>
+          <p class="display specimen-display">We make quotes even.</p>
+          <p style="color: var(--muted); font-size: 13px; margin-top: 4px;">
+            Opsz variable. Tight tracking at large sizes (-0.02 to -0.035em).
+            Use for hero, section headings, wordmark, OG graphics.
+          </p>
+        </div>
+        <div class="card">
+          <p class="eyebrow">Body · Geist · 400–600</p>
+          <p class="specimen-body">
+            Geist is a refined neo-grotesque with honest letterforms and
+            restrained personality — it stays out of the way so Fraunces
+            can do the talking. We set body copy at 16–18px with 1.55–1.65
+            line-height.
+          </p>
+        </div>
+        <div class="card ink" style="color: var(--cream);">
+          <p class="eyebrow" style="color: rgba(245,241,232,0.6);">Mono · Geist Mono · 400–500</p>
+          <p class="mono specimen-mono" style="color: var(--lime); text-transform: uppercase; letter-spacing: 0.18em;">
+            Step 2 of 2 — Payment
+          </p>
+          <p class="mono specimen-mono" style="color: var(--cream); margin-top: 12px;">
+            Request ID: req_8f2a03b1-9c41-4eab-b7de-40a1d6f7e2c9
+          </p>
+          <p style="color: rgba(245,241,232,0.6); font-size: 12px; margin-top: 12px;">
+            Eyebrows, request IDs, timestamps, data values.
+          </p>
+        </div>
+        <div class="card">
+          <p class="eyebrow">Scale (desktop baseline)</p>
+          <table>
+            <tr><td><code>h1</code></td><td>Fraunces 800 · 56–112px · -0.02em</td></tr>
+            <tr><td><code>h2</code></td><td>Fraunces 800 · 36–56px · -0.02em</td></tr>
+            <tr><td><code>h3</code></td><td>Geist 600 · 18px</td></tr>
+            <tr><td><code>body</code></td><td>Geist 400 · 16px · 1.55</td></tr>
+            <tr><td><code>lede</code></td><td>Geist 400 · 20px · 1.5</td></tr>
+            <tr><td><code>eyebrow</code></td><td>Geist Mono 500 · 11px · 0.18em tracking</td></tr>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────── VOICE ─────────── -->
+    <section>
+      <p class="eyebrow">Voice &amp; tone</p>
+      <h2 class="display">Direct. Literary. Never cute.</h2>
+
+      <div class="grid grid-2" style="margin-top: 24px;">
+        <div class="card">
+          <h3>Yes</h3>
+          <ul>
+            <li>Short sentences. One idea each.</li>
+            <li>Concrete nouns over abstractions ("movers", not "service providers").</li>
+            <li>Em-dashes welcome. Semicolons welcome.</li>
+            <li>Confident numbers: "up to 20", "under 24 hours", "$9.99 flat".</li>
+            <li>AI caller introduces itself plainly: "I'm with EvenQuote."</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>No</h3>
+          <ul>
+            <li>No exclamation marks outside errors.</li>
+            <li>No "revolutionize", "seamless", "best-in-class", "game-changer".</li>
+            <li>No emoji in product copy. (Internal Slack is fair game.)</li>
+            <li>No fake urgency ("limited time!") — we charge the same flat $9.99.</li>
+            <li>No corporate we-speak. If a human wouldn't say it out loud, rewrite.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 24px; background: var(--ink); color: var(--cream); border: none;">
+        <p class="eyebrow" style="color: rgba(245,241,232,0.6);">Signature lines in the wild</p>
+        <p class="display" style="font-size: 28px; margin-top: 12px; color: var(--cream);">
+          "Stop chasing quotes. Start comparing them."
+        </p>
+        <p class="display" style="font-size: 28px; margin-top: 8px; color: var(--cream);">
+          "Twenty calls. One inbox. $9.99."
+        </p>
+        <p class="display" style="font-size: 28px; margin-top: 8px; color: var(--cream);">
+          "We make the calls so you don't."
+        </p>
+      </div>
+    </section>
+
+    <!-- ─────────── FAVICON + OG ─────────── -->
+    <section>
+      <p class="eyebrow">Favicon &amp; share image</p>
+      <h2 class="display">The 16px and 1200px test.</h2>
+      <p style="max-width: 58ch; margin-bottom: 32px;">
+        The bars mark (Concept A) is the favicon at every size. The
+        OpenGraph image combines the Fraunces wordmark, a short promise,
+        and a lime disc for visual weight.
+      </p>
+
+      <p class="eyebrow" style="margin-bottom: 12px;">Favicon sizes</p>
+      <div class="favicon-grid">
+        <div>
+          <div class="favicon-ex ink" style="width: 16px; height: 16px;">
+            <svg width="12" height="12" viewBox="0 0 90 90" fill="none"><rect x="12" y="28" width="66" height="10" rx="2" fill="#CEFF00"/><rect x="12" y="50" width="66" height="10" rx="2" fill="#CEFF00"/></svg>
+          </div>
+          <p class="lockup-note">16×16</p>
+        </div>
+        <div>
+          <div class="favicon-ex ink" style="width: 32px; height: 32px;">
+            <svg width="22" height="22" viewBox="0 0 90 90" fill="none"><rect x="12" y="28" width="66" height="10" rx="2" fill="#CEFF00"/><rect x="12" y="50" width="66" height="10" rx="2" fill="#CEFF00"/></svg>
+          </div>
+          <p class="lockup-note">32×32</p>
+        </div>
+        <div>
+          <div class="favicon-ex ink" style="width: 48px; height: 48px;">
+            <svg width="34" height="34" viewBox="0 0 90 90" fill="none"><rect x="12" y="28" width="66" height="10" rx="2" fill="#CEFF00"/><rect x="12" y="50" width="66" height="10" rx="2" fill="#CEFF00"/></svg>
+          </div>
+          <p class="lockup-note">48×48</p>
+        </div>
+        <div>
+          <div class="favicon-ex lime" style="width: 72px; height: 72px; border-radius: 16px;">
+            <svg width="50" height="50" viewBox="0 0 90 90" fill="none"><rect x="12" y="28" width="66" height="10" rx="2" fill="#0A0A0A"/><rect x="12" y="50" width="66" height="10" rx="2" fill="#0A0A0A"/></svg>
+          </div>
+          <p class="lockup-note">App icon · 72×72 (lime field, ink bars)</p>
+        </div>
+        <div>
+          <div class="favicon-ex ink" style="width: 128px; height: 128px; border-radius: 24px;">
+            <svg width="80" height="80" viewBox="0 0 90 90" fill="none"><rect x="12" y="28" width="66" height="10" rx="2" fill="#CEFF00"/><rect x="12" y="50" width="66" height="10" rx="2" fill="#CEFF00"/></svg>
+          </div>
+          <p class="lockup-note">App icon · 128×128</p>
+        </div>
+      </div>
+
+      <p class="eyebrow" style="margin: 40px 0 12px;">OpenGraph image · 1200×630</p>
+      <div class="og">
+        <p class="tag">EvenQuote.com · $9.99 flat</p>
+        <h4>Stop chasing quotes.<br/>Start comparing them.</h4>
+        <p class="brand">Even<span style="color: var(--lime);">Quote</span></p>
+      </div>
+    </section>
+
+    <!-- ─────────── EMAIL + DNS ─────────── -->
+    <section>
+      <p class="eyebrow">Domain &amp; email setup</p>
+      <h2 class="display">DNS checklist for evenquote.com.</h2>
+      <p style="max-width: 58ch;">
+        You own the domain — now lock it down. The webhook magic-link
+        flow sends mail from a <code>@evenquote.com</code> address, so
+        proper SPF/DKIM/DMARC records are required or emails will land
+        in spam. Everything below goes into your registrar's DNS panel.
+      </p>
+
+      <div class="grid grid-2" style="margin-top: 24px;">
+        <div class="card">
+          <h3>1. Pick an email provider</h3>
+          <ul>
+            <li><strong>Google Workspace</strong> — $7/user/mo. Best UX. Good for <code>antonio@</code> and <code>support@</code>.</li>
+            <li><strong>Fastmail</strong> — $3/user/mo. Simpler. No Google lock-in.</li>
+            <li><strong>Proton Mail</strong> — $4/user/mo. If you want e2e.</li>
+          </ul>
+          <p style="color: var(--muted); font-size: 13px; margin-top: 12px;">
+            Separately — transactional mail (magic links, receipts) goes
+            through <strong>Resend</strong> or <strong>SES</strong> from a
+            <code>noreply@evenquote.com</code> sender. Don't send
+            transactional from your human inbox.
+          </p>
+        </div>
+        <div class="card">
+          <h3>2. Records you'll create</h3>
+          <table>
+            <tr><th>Type</th><th>Purpose</th></tr>
+            <tr><td><code>MX</code></td><td>Inbound mail (from Workspace/Fastmail/Proton).</td></tr>
+            <tr><td><code>TXT</code> (SPF)</td><td>Authorizes your senders. One record, merged.</td></tr>
+            <tr><td><code>TXT/CNAME</code> (DKIM)</td><td>Signs outbound mail. One per sender (Workspace, Resend).</td></tr>
+            <tr><td><code>TXT</code> (DMARC)</td><td>Tells receivers what to do with failures.</td></tr>
+            <tr><td><code>CNAME</code></td><td><code>www.evenquote.com</code> → Vercel.</td></tr>
+            <tr><td><code>A</code></td><td>Apex <code>evenquote.com</code> → Vercel IP.</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 24px;">
+        <h3>3. SPF starter (merge senders into one record)</h3>
+        <p>
+          Only publish <strong>one</strong> SPF record per domain. If you
+          add Resend later, edit the existing record — don't create a second.
+        </p>
+        <pre style="background: var(--ink); color: var(--cream); padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'Geist Mono', monospace; font-size: 13px; margin: 12px 0 0;"><code style="background: transparent; padding: 0; color: inherit;">@   IN  TXT  "v=spf1 include:_spf.google.com include:amazonses.com ~all"</code></pre>
+      </div>
+
+      <div class="card" style="margin-top: 16px;">
+        <h3>4. DMARC starter (monitor first, enforce later)</h3>
+        <p>
+          Start with <code>p=none</code> and a reporting address so you
+          can see who's sending as you. Tighten to <code>p=quarantine</code>
+          after 2 weeks of clean reports.
+        </p>
+        <pre style="background: var(--ink); color: var(--cream); padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'Geist Mono', monospace; font-size: 13px; margin: 12px 0 0;"><code style="background: transparent; padding: 0; color: inherit;">_dmarc  IN  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@evenquote.com; fo=1"</code></pre>
+      </div>
+
+      <div class="card" style="margin-top: 16px;">
+        <h3>5. Mailboxes to reserve on day one</h3>
+        <ul>
+          <li><code>antonio@evenquote.com</code> — your personal.</li>
+          <li><code>support@evenquote.com</code> — already referenced in the success page.</li>
+          <li><code>noreply@evenquote.com</code> — transactional sender (Resend/SES).</li>
+          <li><code>dmarc@evenquote.com</code> — alias that forwards to you; reports land here.</li>
+          <li><code>hello@evenquote.com</code> — press/partnerships catchall.</li>
+          <li><code>legal@evenquote.com</code> — Stripe/Supabase require this in ToS forms.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ─────────── USAGE DO/DON'T ─────────── -->
+    <section>
+      <p class="eyebrow">Usage — quick rules</p>
+      <h2 class="display">The five things to not screw up.</h2>
+      <ol style="max-width: 64ch; font-size: 17px; padding-left: 24px;">
+        <li style="margin-bottom: 10px;"><strong>Wordmark is one word.</strong> "EvenQuote", never "Even Quote" or "Even-Quote".</li>
+        <li style="margin-bottom: 10px;"><strong>Never set the wordmark in Arial/Inter/Helvetica.</strong> Always Fraunces. If Fraunces can't render, fall back to the monochrome SVG.</li>
+        <li style="margin-bottom: 10px;"><strong>Lime is an accent, not a background for body copy.</strong> AA contrast fails fast.</li>
+        <li style="margin-bottom: 10px;"><strong>Mark + wordmark together</strong> only when space allows. At sub-32px, use the mark alone.</li>
+        <li style="margin-bottom: 10px;"><strong>Capitalize "EvenQuote" internally</strong> in code (package name <code>evenquote</code> is fine; user-facing copy is <code>EvenQuote</code>).</li>
+      </ol>
+    </section>
+
+    <p class="footer">
+      Version 0.1 · April 21, 2026 · Built for <a href="https://evenquote.com">evenquote.com</a>.
+      This file lives at <code>docs/brand/BRAND.html</code> — edit in place, open in a browser for full fidelity.
+    </p>
+  </div>
+</body>
+</html>

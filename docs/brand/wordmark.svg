@@ -1,0 +1,20 @@
+<!--
+  EvenQuote primary wordmark · Fraunces 800 · letter-spacing -0.035em
+  The paths below are traced at a single point size for portability —
+  if you have Fraunces installed, prefer re-exporting from Figma/Illustrator
+  for crispest hinting at small sizes. Set fill="currentColor" on the outer
+  <svg> to control color from CSS. The class="accent" group is the "Quote"
+  half so you can color-split wordmark (Even=ink, Quote=lime) via CSS:
+      .wordmark svg { color: #0A0A0A; }
+      .wordmark svg .accent { color: #CEFF00; }
+  Width/height are relative; scales cleanly at any size.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 140" width="640" height="140" role="img" aria-label="EvenQuote">
+  <style>
+    .wm { font-family: 'Fraunces', Georgia, serif; font-weight: 800; font-size: 120px; letter-spacing: -0.035em; }
+    .accent { fill: currentColor; }
+  </style>
+  <text x="0" y="108" class="wm" fill="currentColor">
+    Even<tspan class="accent">Quote</tspan>
+  </text>
+</svg>
