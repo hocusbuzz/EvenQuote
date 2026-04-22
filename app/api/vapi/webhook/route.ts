@@ -119,7 +119,18 @@ async function handleEndOfCall(
     return;
   }
 
-  if (call.status === 'completed' || call.status === 'failed') {
+  // Short-circuit on ANY terminal status. Vapi retries end-of-call-report
+  // delivery if we 5xx (or sometimes transiently even on 2xx), so a retry
+  // for a no_answer / refused call must not double-fire apply_call_end —
+  // that would bump total_calls_completed twice and could advance the
+  // parent quote_request to 'processing' before the real last call lands.
+  const TERMINAL_STATUSES = new Set<string>([
+    'completed',
+    'failed',
+    'no_answer',
+    'refused',
+  ]);
+  if (TERMINAL_STATUSES.has(call.status)) {
     console.log(`[vapi webhook] call ${call.id} already in terminal status=${call.status}; skipping`);
     return;
   }
