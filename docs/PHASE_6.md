@@ -18,7 +18,7 @@ lib/
   calls/
     select-businesses.ts                # top-K selector (category + zip/state)
     vapi.ts                             # outbound call + webhook verification
-    extract-quote.ts                    # transcript → structured quote (OpenAI)
+    extract-quote.ts                    # transcript → structured quote (Claude tool-use)
     engine.ts                           # runCallBatch: claim → select → insert → dispatch
   queue/
     enqueue-calls.ts                    # now a thin facade over engine.runCallBatch
@@ -42,7 +42,8 @@ All optional — the system degrades gracefully when any are missing:
 | `VAPI_ASSISTANT_ID`           | Engine runs in simulation mode.                    |
 | `VAPI_PHONE_NUMBER_ID`        | Engine runs in simulation mode.                    |
 | `VAPI_WEBHOOK_SECRET`         | Webhook accepts without verification (dev).        |
-| `OPENAI_API_KEY`              | Quote extraction skipped; call still completes.    |
+| `ANTHROPIC_API_KEY`           | Quote extraction skipped; call still completes.    |
+| `ANTHROPIC_EXTRACTION_MODEL`  | Defaults to `claude-haiku-4-5-20251001`.           |
 | `CALL_BATCH_SIZE`             | Defaults to 5.                                     |
 
 ## Apply the migration
@@ -132,7 +133,7 @@ curl -X POST http://localhost:3000/api/vapi/webhook \
 
 # 6. Verify:
 #    - calls row status=completed, transcript populated
-#    - quotes row inserted (if OPENAI_API_KEY set) with price_min=1200, price_max=1600
+#    - quotes row inserted (if ANTHROPIC_API_KEY set) with price_min=1200, price_max=1600
 #    - quote_requests.total_calls_completed incremented
 #    - when total_calls_completed == total_businesses_to_call, status=processing
 ```

@@ -7,7 +7,7 @@
 //   1. Verify the shared-secret header (VAPI_WEBHOOK_SECRET).
 //   2. Locate our calls row via vapi_call_id (unique index).
 //   3. Persist transcript/summary/recording/cost/duration.
-//   4. Attempt quote extraction (OpenAI or Vapi's structured data).
+//   4. Attempt quote extraction (Vapi's structured data or Claude tool-use).
 //   5. Insert a quotes row if extraction succeeded.
 //   6. Bump request counters; advance request status if this was the
 //      last outstanding call.

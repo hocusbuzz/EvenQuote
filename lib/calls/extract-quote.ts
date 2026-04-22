@@ -1,6 +1,7 @@
 // Turn a call transcript/summary/analysis payload into a structured
-// quote row. Gated behind OPENAI_API_KEY — if unset, we skip extraction
-// but the call still completes cleanly (no quote row inserted).
+// quote row. Gated behind ANTHROPIC_API_KEY — if unset, we skip
+// extraction but the call still completes cleanly (no quote row
+// inserted).
 //
 // Phase 6.1: the universal quote shape (price range, availability,
 // includes/excludes, notes, contact, onsite flag, confidence) is stable
@@ -12,6 +13,11 @@
 //
 // If categoryContext is omitted, we use the moving defaults (backwards
 // compat for anything still calling the old signature).
+//
+// Why Claude instead of OpenAI's json_object mode: tool-use with an
+// input_schema validates the shape server-side, so we get real
+// "this field must be a number or null" enforcement instead of just
+// "return valid JSON and hope". Less coercion/retry logic here.
 
 export type ExtractedQuote = {
   priceMin: number | null;
@@ -60,7 +66,7 @@ export type ExtractInput = {
 };
 
 export type ExtractResult =
-  | { ok: true; quote: ExtractedQuote; source: 'vapi-structured' | 'openai' }
+  | { ok: true; quote: ExtractedQuote; source: 'vapi-structured' | 'claude' }
   | { ok: false; reason: string };
 
 // Baked-in default so callers that don't pass a category still get
@@ -77,10 +83,45 @@ const DEFAULT_CATEGORY: CategoryContext = {
   },
 };
 
+// JSON Schema we hand to Claude as the tool's input_schema. Claude will
+// refuse to emit anything that doesn't match this shape, which is the
+// whole point of using tool-use instead of a plain text response.
+const EXTRACTION_TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    priceMin: { type: ['number', 'null'], description: 'Low end of price range in USD. null if not stated.' },
+    priceMax: { type: ['number', 'null'], description: 'High end of price range in USD. null if not stated.' },
+    priceDescription: { type: ['string', 'null'], description: 'e.g. "flat $1,200" or "$150/hr with 2hr min"' },
+    availability: { type: ['string', 'null'], description: 'What they said about the requested date/frequency.' },
+    includes: { type: 'array', items: { type: 'string' }, description: 'Things included in the price.' },
+    excludes: { type: 'array', items: { type: 'string' }, description: 'Things NOT included, or charged extra.' },
+    notes: { type: ['string', 'null'], description: 'Anything else worth remembering.' },
+    contactName: { type: ['string', 'null'] },
+    contactPhone: { type: ['string', 'null'] },
+    contactEmail: { type: ['string', 'null'] },
+    requiresOnsiteEstimate: { type: 'boolean', description: 'True if they won\'t quote without an in-person visit.' },
+    confidenceScore: { type: 'number', minimum: 0, maximum: 1, description: 'Your confidence 0..1 this quote is usable.' },
+  },
+  required: [
+    'priceMin',
+    'priceMax',
+    'priceDescription',
+    'availability',
+    'includes',
+    'excludes',
+    'notes',
+    'contactName',
+    'contactPhone',
+    'contactEmail',
+    'requiresOnsiteEstimate',
+    'confidenceScore',
+  ],
+} as const;
+
 /**
  * Preferred order:
  *   1. If Vapi's structured-data extraction already ran, trust it.
- *   2. Else if OPENAI_API_KEY is present, run a JSON-mode extraction.
+ *   2. Else if ANTHROPIC_API_KEY is present, run a tool-use extraction.
  *   3. Else bail — the call still logs, but no quote row is created.
  */
 export async function extractQuoteFromCall(input: ExtractInput): Promise<ExtractResult> {
@@ -90,10 +131,10 @@ export async function extractQuoteFromCall(input: ExtractInput): Promise<Extract
     return { ok: true, quote: fromVapi, source: 'vapi-structured' };
   }
 
-  // 2. OpenAI fallback.
-  const apiKey = process.env.OPENAI_API_KEY;
+  // 2. Claude fallback.
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return { ok: false, reason: 'OPENAI_API_KEY not set; skipping extraction' };
+    return { ok: false, reason: 'ANTHROPIC_API_KEY not set; skipping extraction' };
   }
 
   const transcript = (input.transcript ?? '').trim();
@@ -102,43 +143,57 @@ export async function extractQuoteFromCall(input: ExtractInput): Promise<Extract
   }
 
   const category = input.categoryContext ?? DEFAULT_CATEGORY;
-  const prompt = buildExtractionPrompt(transcript, input.summary ?? '', category);
+  const userContent = buildExtractionPrompt(transcript, input.summary ?? '', category);
+  const model = process.env.ANTHROPIC_EXTRACTION_MODEL ?? 'claude-haiku-4-5-20251001';
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_EXTRACTION_MODEL ?? 'gpt-4o-mini',
+        model,
+        max_tokens: 1024,
         temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [
+        // Forcing tool_choice at this tool guarantees Claude emits a
+        // tool_use block shaped like EXTRACTION_TOOL_SCHEMA — no free-form
+        // prose, no missing fields, no retry loop.
+        tool_choice: { type: 'tool', name: 'record_quote' },
+        tools: [
           {
-            role: 'system',
-            content: `You extract structured ${category.displayName} quote data from call transcripts. Reply only with JSON matching the schema. Use null for anything not mentioned. Never invent prices.`,
+            name: 'record_quote',
+            description: `Record the structured ${category.displayName} quote extracted from the call.`,
+            input_schema: EXTRACTION_TOOL_SCHEMA,
           },
-          { role: 'user', content: prompt },
         ],
+        system: `You extract structured ${category.displayName} quote data from call transcripts. Use null for anything not mentioned. Never invent prices.`,
+        messages: [{ role: 'user', content: userContent }],
       }),
     });
 
     if (!res.ok) {
-      return { ok: false, reason: `OpenAI ${res.status} ${await res.text()}` };
+      return { ok: false, reason: `Anthropic ${res.status} ${await res.text()}` };
     }
 
     const body = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      content?: Array<
+        | { type: 'tool_use'; name: string; input: unknown }
+        | { type: 'text'; text: string }
+      >;
     };
-    const content = body.choices?.[0]?.message?.content;
-    if (!content) return { ok: false, reason: 'OpenAI response missing content' };
+    const toolUse = body.content?.find(
+      (b): b is { type: 'tool_use'; name: string; input: unknown } => b.type === 'tool_use'
+    );
+    if (!toolUse) {
+      return { ok: false, reason: 'Anthropic response missing tool_use block' };
+    }
 
-    const parsed = JSON.parse(content) as unknown;
-    const quote = coerceFromOpenAI(parsed);
-    if (!quote) return { ok: false, reason: 'OpenAI response failed schema coercion' };
-    return { ok: true, quote, source: 'openai' };
+    const quote = coerceFromClaude(toolUse.input);
+    if (!quote) return { ok: false, reason: 'Anthropic response failed schema coercion' };
+    return { ok: true, quote, source: 'claude' };
   } catch (err) {
     return {
       ok: false,
@@ -156,7 +211,7 @@ function buildExtractionPrompt(
   const includes = (schema.includes_examples ?? []).join(', ');
   const excludes = (schema.excludes_examples ?? []).join(', ');
 
-  return `You are extracting a structured ${category.displayName} quote from a call transcript.
+  return `You are extracting a structured ${category.displayName} quote from a call transcript. Call the record_quote tool with your extraction.
 
 ${schema.domain_notes ?? ''}
 
@@ -179,22 +234,6 @@ Summary (if available):
 ${summary}
 """
 
-Extract JSON with EXACTLY these keys. Use null when not stated.
-{
-  "priceMin": number|null,                // low end of price range in USD
-  "priceMax": number|null,                // high end of price range in USD
-  "priceDescription": string|null,        // e.g. "flat $1,200" or "$150/hr with 2hr min"
-  "availability": string|null,            // what they said about the requested date/frequency
-  "includes": string[],                   // things included in the price
-  "excludes": string[],                   // things NOT included, or charged extra
-  "notes": string|null,                   // anything else worth remembering
-  "contactName": string|null,
-  "contactPhone": string|null,
-  "contactEmail": string|null,
-  "requiresOnsiteEstimate": boolean,      // true if they won't quote without an in-person visit
-  "confidenceScore": number               // your confidence 0..1 this quote is usable
-}
-
 Rules:
 - Never invent prices. If not stated, priceMin/priceMax MUST be null.
 - If onsite estimate is required, prices may be null and requiresOnsiteEstimate=true.
@@ -206,7 +245,7 @@ function coerceFromVapi(data: unknown): ExtractedQuote | null {
   const d = data as Record<string, unknown>;
   // Accept either the schema we prompt for above (camelCase) or
   // a snake_case variant that Vapi assistants sometimes produce.
-  return coerceFromOpenAI({
+  return coerceFromClaude({
     priceMin: d.priceMin ?? d.price_min ?? null,
     priceMax: d.priceMax ?? d.price_max ?? null,
     priceDescription: d.priceDescription ?? d.price_description ?? null,
@@ -223,7 +262,7 @@ function coerceFromVapi(data: unknown): ExtractedQuote | null {
   });
 }
 
-function coerceFromOpenAI(raw: unknown): ExtractedQuote | null {
+function coerceFromClaude(raw: unknown): ExtractedQuote | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
 
