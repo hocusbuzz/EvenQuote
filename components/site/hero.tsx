@@ -14,6 +14,7 @@
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { ArrowRight } from 'lucide-react';
+import { RotatingWord } from '@/components/site/rotating-word';
 
 export function Hero() {
   return (
@@ -30,7 +31,7 @@ export function Hero() {
             <span className="block">Stop</span>
             <span className="block">calling 20</span>
             <span className="block">
-              <em className="not-italic bg-lime px-3 py-0.5">movers.</em>
+              <RotatingWord />
             </span>
           </h1>
 
