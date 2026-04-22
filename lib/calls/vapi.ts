@@ -103,6 +103,12 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
  * Verify a Vapi webhook. Vapi supports a shared-secret header approach:
  * set the same value in Vapi's webhook config and in VAPI_WEBHOOK_SECRET
  * here. If the env isn't set we accept everything (dev mode) but log it.
+ *
+ * Accepts either presentation so it works with any of Vapi's credential
+ * types in their Server Configuration UI:
+ *   • `x-vapi-secret: <secret>`         — legacy Server URL Secret field
+ *   • `X-Vapi-Secret: <secret>`         — same, case variant
+ *   • `Authorization: Bearer <secret>`  — current "Bearer Token" credential
  */
 export function verifyVapiWebhook(req: Request): { ok: true } | { ok: false; error: string } {
   const expected = process.env.VAPI_WEBHOOK_SECRET;
@@ -110,10 +116,14 @@ export function verifyVapiWebhook(req: Request): { ok: true } | { ok: false; err
     console.warn('[vapi webhook] VAPI_WEBHOOK_SECRET not set — accepting without verification');
     return { ok: true };
   }
+  const bearer = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
   const provided =
-    req.headers.get('x-vapi-secret') ?? req.headers.get('X-Vapi-Secret') ?? '';
+    req.headers.get('x-vapi-secret') ??
+    req.headers.get('X-Vapi-Secret') ??
+    bearer ??
+    '';
   if (provided !== expected) {
-    return { ok: false, error: 'Invalid or missing x-vapi-secret header' };
+    return { ok: false, error: 'Invalid or missing auth header (expected x-vapi-secret or Authorization: Bearer)' };
   }
   return { ok: true };
 }
