@@ -11,12 +11,22 @@
 // The UI is deliberately minimal. Phase 10 replaces this with a
 // richer comparison view.
 
+import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { requireUser } from '@/lib/auth';
 import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { ReleaseContactButton } from './release-button';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('request-detail');
+
+// Per-user data under a UUID — explicitly keep out of search indexes.
+export const metadata: Metadata = {
+  title: 'Quote details',
+  robots: { index: false, follow: false },
+};
 
 type QuoteRow = {
   id: string;
@@ -62,7 +72,7 @@ export default async function RequestDetailPage({
     .maybeSingle();
 
   if (reqErr) {
-    console.error('[request-detail] load failed', reqErr);
+    log.error('load failed', { requestId: id, err: reqErr.message });
   }
   if (!request) {
     // Either doesn't exist or doesn't belong to this user — 404 either
@@ -98,7 +108,7 @@ export default async function RequestDetailPage({
     .order('price_min', { ascending: true, nullsFirst: false });
 
   if (qErr) {
-    console.error('[request-detail] quotes load failed', qErr);
+    log.error('quotes load failed', { requestId: id, err: qErr.message });
   }
 
   const quotes: QuoteRow[] = (quotesRaw ?? []).map((q) => {

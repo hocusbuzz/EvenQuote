@@ -8,13 +8,14 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { getCallBatchSize } from '@/lib/env';
 import { selectBusinessesForRequest } from './select-businesses';
 import { startOutboundCall } from './vapi';
 
 // How many businesses we try to call per quote request. Configurable
 // via env so we can tune without a code change. Default of 5 is
 // conservative — most metro moves have plenty of coverage at 5.
-const DEFAULT_BATCH_SIZE = 5;
+// See lib/env.ts for bounds enforcement.
 
 export type RunBatchInput = {
   quoteRequestId: string;
@@ -54,7 +55,9 @@ export async function runCallBatchWith(
   input: RunBatchInput
 ): Promise<RunBatchResult> {
   const { quoteRequestId } = input;
-  const batchSize = Number(process.env.CALL_BATCH_SIZE ?? DEFAULT_BATCH_SIZE);
+  // Use the validated helper so an invalid env var can't silently produce
+  // NaN (which compares false in all arithmetic checks downstream).
+  const batchSize = getCallBatchSize();
 
   // 1. Claim the batch. Two layered idempotency checks:
   //    - status must be 'paid' (webhook set it)

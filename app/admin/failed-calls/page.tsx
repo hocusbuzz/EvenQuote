@@ -12,10 +12,20 @@
 //     would hide failures across the whole user base from an admin.
 //     requireAdmin() gates the page, admin client does the read.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { requireAdmin } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { SiteNavbar } from '@/components/site/navbar';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('admin/failed-calls');
+
+// Admin-only surface. Don't confirm existence to crawlers or unauthed users.
+export const metadata: Metadata = {
+  title: 'Failed calls',
+  robots: { index: false, follow: false },
+};
 
 type FailedCall = {
   id: string;
@@ -61,7 +71,7 @@ export default async function FailedCallsPage() {
     .limit(200);
 
   if (error) {
-    console.error('[admin/failed-calls] query failed', error);
+    log.error('query failed', { err: error.message });
   }
 
   const calls: FailedCall[] = (rows ?? []).map((r) => {

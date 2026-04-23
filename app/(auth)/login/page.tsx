@@ -3,9 +3,19 @@
 // Magic-link first, Google OAuth below (when enabled). Captures ?next=
 // from the URL so users land back where they came from after auth.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { MagicLinkForm } from '@/components/auth/magic-link-form';
 import { GoogleButton, AuthDivider } from '@/components/auth/google-button';
+
+// Page-specific metadata overrides the marketing title from the root layout.
+// Search results for /login should say "Log in" — not the homepage pitch.
+export const metadata: Metadata = {
+  title: 'Log in',
+  description: 'Sign in to EvenQuote with a magic link.',
+  // Auth pages are thin — indexing doesn't hurt, but no OG preview needed.
+  robots: { index: true, follow: true },
+};
 
 type SearchParams = { [key: string]: string | string[] | undefined };
 

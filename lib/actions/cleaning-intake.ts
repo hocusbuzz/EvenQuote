@@ -12,15 +12,32 @@
 // cleaning address — unlike moving which has origin + destination,
 // cleaning is one-location so it drops straight onto the row.
 
+import { headers } from 'next/headers';
 import { CleaningIntakeSchema, type CleaningIntakeData } from '@/lib/forms/cleaning-intake';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
+import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('submitCleaningIntake');
 
 export type SubmitResult =
   | { ok: true; requestId: string }
   | { ok: false; error: string; fieldErrors?: Record<string, string> };
 
 export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> {
+  // 0. Rate limit parity with moving intake — 10/min/IP.
+  const rl = rateLimit(clientKeyFromHeaders(headers(), 'intake:cleaning'), {
+    limit: 10,
+    windowMs: 60_000,
+  });
+  if (!rl.ok) {
+    return {
+      ok: false,
+      error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
+    };
+  }
+
   // 1. Validate
   const parsed = CleaningIntakeSchema.safeParse(raw);
   if (!parsed.success) {
@@ -48,7 +65,7 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
     .single();
 
   if (catErr || !category) {
-    console.error('[submitCleaningIntake] cleaning category not found', catErr);
+    log.error('cleaning category not found', { err: catErr });
     return { ok: false, error: 'Cleaning category is unavailable. Please try again.' };
   }
 
@@ -72,7 +89,7 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
     .single();
 
   if (insertErr || !inserted) {
-    console.error('[submitCleaningIntake] insert failed', insertErr);
+    log.error('insert failed', { err: insertErr, userId: user?.id ?? null });
     return { ok: false, error: 'Could not save your request. Please try again.' };
   }
 

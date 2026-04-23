@@ -24,10 +24,13 @@ export function SiteFooter() {
             </p>
           </div>
 
-          {/* Product column */}
-          <div>
-            <p className="label-eyebrow mb-4 !text-cream/50">Product</p>
-            <ul className="space-y-2 text-sm">
+          {/* Product column — semantic <nav> so screen readers announce
+              the link group with its landmark name. */}
+          <nav aria-label="Product">
+            <p id="footer-product-heading" className="label-eyebrow mb-4 !text-cream/50">
+              Product
+            </p>
+            <ul className="space-y-2 text-sm" aria-labelledby="footer-product-heading">
               <li>
                 <Link href="/get-quotes" className="hover:text-lime">
                   Get quotes
@@ -44,12 +47,14 @@ export function SiteFooter() {
                 </Link>
               </li>
             </ul>
-          </div>
+          </nav>
 
           {/* Account column */}
-          <div>
-            <p className="label-eyebrow mb-4 !text-cream/50">Account</p>
-            <ul className="space-y-2 text-sm">
+          <nav aria-label="Account">
+            <p id="footer-account-heading" className="label-eyebrow mb-4 !text-cream/50">
+              Account
+            </p>
+            <ul className="space-y-2 text-sm" aria-labelledby="footer-account-heading">
               <li>
                 <Link href="/login" className="hover:text-lime">
                   Sign in
@@ -66,7 +71,7 @@ export function SiteFooter() {
                 </Link>
               </li>
             </ul>
-          </div>
+          </nav>
         </div>
 
         <div className="mt-16 flex flex-col items-start justify-between gap-4 border-t border-cream/10 pt-8 font-mono text-xs text-cream/50 sm:flex-row sm:items-center">

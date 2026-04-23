@@ -12,6 +12,9 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('auth/callback');
 
 function safeNext(raw: string | null): string {
   if (!raw) return '/dashboard';
@@ -45,7 +48,7 @@ export async function GET(request: NextRequest) {
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
-    console.error('[auth/callback] exchangeCodeForSession failed', error);
+    log.error('exchangeCodeForSession failed', { err: error.message });
     const url = new URL('/auth-code-error', origin);
     url.searchParams.set('message', error.message || 'Sign-in failed');
     return NextResponse.redirect(url);

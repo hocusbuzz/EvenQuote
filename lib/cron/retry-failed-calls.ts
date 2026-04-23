@@ -25,6 +25,9 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { startOutboundCall } from '@/lib/calls/vapi';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('cron/retry-failed-calls');
 
 // How many rows to process per run. Keeps a hot retry loop bounded and
 // lets a 60s-limited serverless invocation finish comfortably.
@@ -194,9 +197,11 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
         if (applyErr) {
           // Loud log — this is the failure mode that re-creates the
           // stuck-batch bug. Ops should investigate.
-          console.error(
-            `[cron/retry-failed-calls] apply_call_end failed for exhausted row ${row.id} (request ${row.quote_request_id}): ${applyErr.message}`
-          );
+          log.error('apply_call_end failed for exhausted row', {
+            callId: row.id,
+            requestId: row.quote_request_id,
+            err: applyErr.message,
+          });
           notes.push(`call ${row.id}: apply_call_end after exhaustion failed: ${applyErr.message}`);
         } else {
           notes.push(`call ${row.id}: exhausted retries, counted toward total_calls_completed`);

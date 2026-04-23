@@ -14,6 +14,9 @@
 
 import { createAdminClient } from '@/lib/supabase/admin';
 import { sendPendingReports } from '@/lib/cron/send-reports';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('cron/send-reports');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -46,7 +49,7 @@ async function handle(req: Request) {
     const result = await sendPendingReports(admin);
     return Response.json(result);
   } catch (err) {
-    console.error('[cron/send-reports] run failed', err);
+    log.error('run failed', { err });
     return Response.json(
       {
         ok: false,

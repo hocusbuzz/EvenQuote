@@ -7,9 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "verify:db": "tsx scripts/verify-db.ts",
     "stripe:listen": "stripe listen --forward-to localhost:3000/api/stripe/webhook",
-    "ingest:businesses": "tsx scripts/ingest-businesses.ts"
+    "ingest:businesses": "tsx scripts/ingest-businesses.ts",
+    "test:e2e": "tsx scripts/test-e2e.ts",
+    "test:e2e:zero": "tsx scripts/test-e2e.ts --zero-quotes",
+    "test:vapi": "bash scripts/test-vapi-webhook.sh"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.1",
@@ -23,7 +29,7 @@
     "clsx": "^2.1.1",
     "geist": "^1.7.0",
     "lucide-react": "^0.454.0",
-    "next": "14.2.15",
+    "next": "^14.2.35",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "resend": "^6.12.2",
@@ -44,6 +50,7 @@
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "tsx": "^4.19.1",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^4.1.5"
   }
 }

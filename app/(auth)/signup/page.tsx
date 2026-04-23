@@ -4,9 +4,17 @@
 // so /signup and /login use the same underlying mechanism. Keeping them
 // as separate pages purely for UX / SEO / analytics.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { MagicLinkForm } from '@/components/auth/magic-link-form';
 import { GoogleButton, AuthDivider } from '@/components/auth/google-button';
+
+export const metadata: Metadata = {
+  title: 'Sign up',
+  description:
+    'Create your EvenQuote account. No password — we email you a secure sign-in link.',
+  robots: { index: true, follow: true },
+};
 
 type SearchParams = { [key: string]: string | string[] | undefined };
 

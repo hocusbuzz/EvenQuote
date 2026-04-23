@@ -17,6 +17,9 @@
 // Active only. Must have a phone.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('selectBusinesses');
 
 export type SelectedBusiness = {
   id: string;
@@ -131,7 +134,7 @@ async function fetchRadius(
   if (anchorErr) {
     // Soft-fail the radius tier — don't take down the whole selector
     // over a radius lookup issue.
-    console.warn(`[selectBusinesses] radius anchor lookup: ${anchorErr.message}`);
+    log.warn('radius anchor lookup failed', { err: anchorErr.message });
     return [];
   }
   if (!anchor) return [];
@@ -145,7 +148,7 @@ async function fetchRadius(
   });
 
   if (error) {
-    console.warn(`[selectBusinesses] radius rpc: ${error.message}`);
+    log.warn('radius rpc failed', { err: error.message });
     return [];
   }
 

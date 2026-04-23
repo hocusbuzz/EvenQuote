@@ -47,6 +47,9 @@ import {
   type RefundOutcome,
 } from '@/lib/email/templates';
 import { getStripe } from '@/lib/stripe/server';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('cron/send-reports');
 
 // Keep a single invocation bounded — report rendering is cheap but
 // we still want to fit inside a 60s serverless window with headroom.
@@ -277,9 +280,7 @@ async function processOne(
   if (!send.ok) {
     // Leave status='processing' so the next run retries. Log loud so
     // sustained failure gets noticed.
-    console.error(
-      `[cron/send-reports] send failed for ${request.id}: ${send.error}`
-    );
+    log.error('send failed', { requestId: request.id, err: send.error });
     return { status: 'failed', reason: send.error };
   }
 
@@ -294,9 +295,11 @@ async function processOne(
     })
     .eq('id', request.id);
   if (finalErr) {
-    console.error(
-      `[cron/send-reports] email sent (${send.id}) but final stamp failed for ${request.id}: ${finalErr.message}`
-    );
+    log.error('email sent but final stamp failed — will re-send next run', {
+      requestId: request.id,
+      emailId: send.id,
+      err: finalErr.message,
+    });
     return {
       status: 'failed',
       reason: `final stamp: ${finalErr.message}`,
@@ -393,18 +396,17 @@ async function refundForZeroQuotes(
     .maybeSingle();
 
   if (payErr) {
-    console.error(
-      `[cron/send-reports] refund: payments lookup failed for ${requestId}: ${payErr.message}`
-    );
+    log.error('refund: payments lookup failed', {
+      requestId,
+      err: payErr.message,
+    });
     return 'pending_support';
   }
 
   if (!pay) {
     // Shouldn't happen — a processing quote_request implies a paid
     // session. If it does, ops needs to reconcile; don't lie to the user.
-    console.warn(
-      `[cron/send-reports] refund: no payments row for request ${requestId}`
-    );
+    log.warn('refund: no payments row for request', { requestId });
     return 'pending_support';
   }
 
@@ -417,9 +419,10 @@ async function refundForZeroQuotes(
   if (!pay.stripe_payment_intent_id) {
     // Webhook should have populated this. If it didn't, we can't refund
     // via the API — escalate to support.
-    console.warn(
-      `[cron/send-reports] refund: payments ${pay.id} has no payment_intent_id`
-    );
+    log.warn('refund: payments row has no payment_intent_id', {
+      paymentId: pay.id,
+      requestId,
+    });
     return 'pending_support';
   }
 
@@ -444,9 +447,11 @@ async function refundForZeroQuotes(
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[cron/send-reports] refund: stripe.refunds.create failed for ${requestId}: ${msg}`
-    );
+    log.error('refund: stripe.refunds.create failed', {
+      requestId,
+      paymentId: pay.id,
+      err: msg,
+    });
     return 'pending_support';
   }
 
@@ -459,9 +464,11 @@ async function refundForZeroQuotes(
     .update({ status: 'refunded' })
     .eq('id', pay.id);
   if (updErr) {
-    console.error(
-      `[cron/send-reports] refund: payments status update failed for ${pay.id}: ${updErr.message}`
-    );
+    log.error('refund: payments status update failed after successful Stripe refund', {
+      paymentId: pay.id,
+      requestId,
+      err: updErr.message,
+    });
   }
 
   return 'issued';

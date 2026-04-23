@@ -7,6 +7,10 @@
 //
 // Docs: https://docs.vapi.ai/api-reference/calls/create
 
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('vapi');
+
 export type StartCallInput = {
   /** E.164, e.g. +14155551234 */
   toPhone: string;
@@ -37,9 +41,14 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
   // dev and CI run, and it's intentionally obvious (prefix + random).
   if (!apiKey || !phoneNumberId || !assistantId) {
     const fakeId = `sim_${Math.random().toString(36).slice(2, 12)}`;
-    console.log(
-      `[vapi] simulated call to ${input.businessName} (${input.toPhone}) — vapiCallId=${fakeId}`
-    );
+    // Mask the business phone — it's a PII-adjacent identifier when
+    // combined with name/location that we don't want in log retention.
+    const phoneMasked = input.toPhone.replace(/\d(?=\d{4})/g, '*');
+    log.info('simulated call', {
+      businessName: input.businessName,
+      phoneMasked,
+      vapiCallId: fakeId,
+    });
     return {
       ok: true,
       vapiCallId: fakeId,
@@ -48,15 +57,46 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
     };
   }
 
+  // Test-mode safety net: if TEST_OVERRIDE_PHONE is set, redirect every
+  // outbound call to that number instead of the real business. The
+  // assistant still introduces itself with the original business name
+  // and the webhook still routes via metadata.business_id, so the rest
+  // of the post-call pipeline behaves exactly as it would in prod.
+  // REMOVE this env var before going live (or it'll override real calls).
+  const overridePhone = process.env.TEST_OVERRIDE_PHONE?.trim();
+  const dialNumber = overridePhone && overridePhone.length > 0 ? overridePhone : input.toPhone;
+  if (overridePhone) {
+    const realMasked = input.toPhone.replace(/\d(?=\d{4})/g, '*');
+    log.warn('TEST_OVERRIDE_PHONE active — redirecting call', {
+      businessName: input.businessName,
+      realMasked,
+      overridePhone,
+    });
+  }
+
+  // Vapi rejects customer.name > 40 chars with a 400. Long contractor
+  // names are common ("Two Men and a Truck® - North County San Diego"
+  // is 47), so truncate defensively. The full, untruncated name still
+  // flows into assistantOverrides.variableValues.business_name so the
+  // assistant can use it in conversation.
+  const VAPI_NAME_MAX = 40;
+  const truncatedName =
+    input.businessName.length > VAPI_NAME_MAX
+      ? `${input.businessName.slice(0, VAPI_NAME_MAX - 1).trimEnd()}…`
+      : input.businessName;
+
   const body = {
     phoneNumberId,
     assistantId,
     customer: {
-      number: input.toPhone,
-      name: input.businessName,
+      number: dialNumber,
+      name: truncatedName,
     },
     assistantOverrides: {
-      variableValues: input.variableValues,
+      variableValues: {
+        ...input.variableValues,
+        business_name: input.businessName,
+      },
     },
     metadata: input.metadata,
   };
@@ -119,13 +159,13 @@ export function verifyVapiWebhook(req: Request): { ok: true } | { ok: false; err
   const expected = process.env.VAPI_WEBHOOK_SECRET;
   if (!expected) {
     if (process.env.NODE_ENV === 'production') {
-      console.error(
-        '[vapi webhook] VAPI_WEBHOOK_SECRET is not set in production — refusing to accept request'
+      log.error(
+        'VAPI_WEBHOOK_SECRET is not set in production — refusing to accept request'
       );
       return { ok: false, error: 'Webhook misconfigured: secret not set' };
     }
-    console.warn(
-      '[vapi webhook] VAPI_WEBHOOK_SECRET not set — DEV MODE, accepting without verification'
+    log.warn(
+      'VAPI_WEBHOOK_SECRET not set — DEV MODE, accepting without verification'
     );
     return { ok: true };
   }

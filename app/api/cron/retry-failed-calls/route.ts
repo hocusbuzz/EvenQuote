@@ -19,6 +19,9 @@
 
 import { createAdminClient } from '@/lib/supabase/admin';
 import { retryFailedCalls } from '@/lib/cron/retry-failed-calls';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('cron/retry-failed-calls');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -53,6 +56,20 @@ async function handle(req: Request) {
   }
 
   const admin = createAdminClient();
-  const result = await retryFailedCalls(admin);
-  return Response.json(result);
+  try {
+    const result = await retryFailedCalls(admin);
+    return Response.json(result);
+  } catch (err) {
+    // Safe envelope: log the full error server-side (structured logger),
+    // but return only the short message to the caller so we don't leak
+    // stack traces or internal query shapes to a misbehaving caller.
+    log.error('run failed', { err });
+    return Response.json(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      { status: 500 }
+    );
+  }
 }

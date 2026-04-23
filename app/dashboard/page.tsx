@@ -7,11 +7,21 @@
 // Data pulled through the cookie-bound client so RLS filters to the
 // current user automatically — no service-role here.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { requireUser, getProfile } from '@/lib/auth';
 import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { Button } from '@/components/ui/button';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('dashboard');
+
+// Private — don't let it show up in search; browser tab still gets a useful title.
+export const metadata: Metadata = {
+  title: 'Your quote requests',
+  robots: { index: false, follow: false },
+};
 
 type RequestRow = {
   id: string;
@@ -52,7 +62,7 @@ export default async function DashboardPage() {
     .limit(50);
 
   if (error) {
-    console.error('[dashboard] list failed', error);
+    log.error('list failed', { err: error.message });
   }
 
   const requests = (rows ?? []).map((r) => {

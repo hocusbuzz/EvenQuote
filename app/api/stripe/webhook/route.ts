@@ -41,6 +41,9 @@ import { getStripe } from '@/lib/stripe/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { sendPaymentMagicLink } from '@/lib/actions/post-payment';
 import { enqueueQuoteCalls } from '@/lib/queue/enqueue-calls';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('stripe/webhook');
 
 // Webhook route must not be statically optimized. Force per-request.
 export const dynamic = 'force-dynamic';
@@ -55,7 +58,7 @@ export async function POST(
 ): Promise<NextResponse<OkResponse | ErrResponse>> {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   if (!secret) {
-    console.error('[stripe/webhook] STRIPE_WEBHOOK_SECRET is not set');
+    log.error('STRIPE_WEBHOOK_SECRET is not set');
     return NextResponse.json({ error: 'Webhook misconfigured' }, { status: 500 });
   }
 
@@ -73,7 +76,7 @@ export async function POST(
     event = stripe.webhooks.constructEvent(raw, signature, secret);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'signature verification failed';
-    console.error('[stripe/webhook] signature verification failed:', msg);
+    log.error('signature verification failed', { err: msg });
     // 400 so Stripe stops retrying tampered/bad events rather than hammering us.
     return NextResponse.json({ error: `Invalid signature: ${msg}` }, { status: 400 });
   }
@@ -106,7 +109,7 @@ export async function POST(
 
       default:
         // Unknown but well-formed event. 200 so Stripe doesn't retry.
-        console.log(`[stripe/webhook] Unhandled event type: ${event.type}`);
+        log.info('unhandled event type', { eventType: event.type, eventId: event.id });
         return NextResponse.json({
           received: true,
           eventId: event.id,
@@ -116,7 +119,7 @@ export async function POST(
   } catch (err) {
     // Anything unexpected: 500 so Stripe retries. We logged it below in
     // the handler, so this is a hook for correlation.
-    console.error('[stripe/webhook] handler threw', err);
+    log.error('handler threw', { err });
     return NextResponse.json({ error: 'Handler error' }, { status: 500 });
   }
 }
@@ -141,7 +144,7 @@ async function handleCheckoutCompleted(
     // This means we got a checkout.session.completed we didn't originate.
     // Someone else's integration on the same Stripe account? Unlikely but
     // possible. Log and ack.
-    console.warn('[stripe/webhook] session.completed with no quote_request id', {
+    log.warn('session.completed with no quote_request id', {
       sessionId: session.id,
       eventId: event.id,
     });
@@ -152,7 +155,7 @@ async function handleCheckoutCompleted(
     // e.g. 'unpaid' on manual invoices. Our flow is all upfront card so
     // this should not happen, but we don't want to mark paid on a 'unpaid'
     // session by accident.
-    console.warn('[stripe/webhook] session.completed but payment_status not "paid"', {
+    log.warn('session.completed but payment_status not paid', {
       sessionId: session.id,
       paymentStatus: session.payment_status,
     });
@@ -205,14 +208,14 @@ async function handleCheckoutCompleted(
     //      unique index would catch it too).
     // Both are effectively "already done" — ack and move on.
     if (insertErr.code === '23505') {
-      console.log('[stripe/webhook] duplicate event, already processed', {
+      log.info('duplicate event, already processed', {
         eventId: event.id,
         sessionId: session.id,
       });
       return 'Duplicate event — already processed';
     }
 
-    console.error('[stripe/webhook] payments insert failed', insertErr);
+    log.error('payments insert failed', { err: insertErr });
     // Throw to bubble up to the outer handler, which returns 500 and
     // triggers Stripe to retry. We WANT the retry here.
     throw new Error(`payments insert failed: ${insertErr.message}`);
@@ -230,7 +233,7 @@ async function handleCheckoutCompleted(
     .maybeSingle();
 
   if (updateErr) {
-    console.error('[stripe/webhook] quote_requests update failed', updateErr);
+    log.error('quote_requests update failed', { err: updateErr, requestId });
     // Don't throw — we already recorded the payment. A later reconcile
     // can promote the status. Returning 200 prevents retry storms.
     return 'Payment recorded; status update failed (will reconcile)';
@@ -239,7 +242,7 @@ async function handleCheckoutCompleted(
   if (!updated) {
     // Row was not in pending_payment. Could be already paid (webhook
     // re-entry caught by the insert idempotency above) or advanced.
-    console.log('[stripe/webhook] quote_request not in pending_payment, skipping status flip', {
+    log.info('quote_request not in pending_payment, skipping status flip', {
       requestId,
     });
     return 'Payment recorded; status was already advanced';
@@ -262,16 +265,16 @@ async function handleCheckoutCompleted(
         requestId,
       });
     } catch (err) {
-      console.error('[stripe/webhook] magic link send failed', err);
+      log.error('magic link send failed', { err, requestId });
     }
   } else {
-    console.warn('[stripe/webhook] no contact email found for magic link', { requestId });
+    log.warn('no contact email found for magic link', { requestId });
   }
 
   try {
     await enqueueQuoteCalls({ quoteRequestId: requestId });
   } catch (err) {
-    console.error('[stripe/webhook] enqueue calls failed', err);
+    log.error('enqueue calls failed', { err, requestId });
   }
 
   return 'Processed';

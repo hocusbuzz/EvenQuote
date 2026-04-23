@@ -11,6 +11,7 @@
 
 import 'server-only';
 import { Resend } from 'resend';
+import { redactPII } from '@/lib/logger';
 
 export type SendEmailInput = {
   to: string | string[];
@@ -51,8 +52,11 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   if (!client) {
     const fakeId = `sim_email_${Math.random().toString(36).slice(2, 12)}`;
     const toPreview = Array.isArray(input.to) ? input.to.join(', ') : input.to;
+    // Redact the recipient in logs — even in simulation mode we don't
+    // want real addresses in log retention for staging envs that
+    // occasionally run without RESEND_API_KEY set.
     console.log(
-      `[email] simulated send → ${toPreview} — subject="${input.subject}" id=${fakeId}${
+      `[email] simulated send → ${redactPII(toPreview)} — subject="${input.subject}" id=${fakeId}${
         input.tag ? ` tag=${input.tag}` : ''
       }`
     );

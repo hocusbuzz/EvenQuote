@@ -32,6 +32,7 @@
 //   - A small lime chip bar across the top gives the page a bit of
 //     brand personality without overwhelming the purchase moment.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -40,6 +41,13 @@ import { SiteFooter } from '@/components/site/footer';
 import { PayButton } from '@/components/checkout/pay-button';
 import { QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
 import { maskEmail } from '@/lib/text/pii';
+
+// Transactional page keyed on a UUID — noindex so guessable URLs don't
+// surface in search. Title is the browser-tab title, still friendly.
+export const metadata: Metadata = {
+  title: 'Checkout',
+  robots: { index: false, follow: false },
+};
 
 type Props = {
   searchParams: { request?: string; cancelled?: string };

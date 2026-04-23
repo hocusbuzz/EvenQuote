@@ -24,15 +24,35 @@
 // with this phase.
 
 import { z } from 'zod';
+import { headers } from 'next/headers';
 import { MovingIntakeSchema, type MovingIntakeData } from '@/lib/forms/moving-intake';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
+import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('submitMovingIntake');
 
 export type SubmitResult =
   | { ok: true; requestId: string }
   | { ok: false; error: string; fieldErrors?: Record<string, string> };
 
 export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
+  // 0. Rate limit: 10 intake submissions per minute per IP. Higher than
+  // the waitlist because a real user often submits once per device and
+  // rarely more, but the intake form has multiple steps so a single
+  // hesitant user might retry a couple times. Anything past 10 is bot-shaped.
+  const rl = rateLimit(clientKeyFromHeaders(headers(), 'intake:moving'), {
+    limit: 10,
+    windowMs: 60_000,
+  });
+  if (!rl.ok) {
+    return {
+      ok: false,
+      error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
+    };
+  }
+
   // 1. Validate
   const parsed = MovingIntakeSchema.safeParse(raw);
   if (!parsed.success) {
@@ -60,7 +80,7 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
     .single();
 
   if (catErr || !category) {
-    console.error('[submitMovingIntake] moving category not found', catErr);
+    log.error('moving category not found', { err: catErr });
     return { ok: false, error: 'Moving category is unavailable. Please try again.' };
   }
 
@@ -87,7 +107,7 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
     .single();
 
   if (insertErr || !inserted) {
-    console.error('[submitMovingIntake] insert failed', insertErr);
+    log.error('insert failed', { err: insertErr, userId: user?.id ?? null });
     return { ok: false, error: 'Could not save your request. Please try again.' };
   }
 

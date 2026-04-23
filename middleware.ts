@@ -3,6 +3,12 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';
+import {
+  buildCsp,
+  cspHeaderName,
+  generateNonce,
+  isCspNonceEnabled,
+} from '@/lib/security/csp';
 
 // Paths that MUST keep working even when the site is gated.
 // Webhooks + cron jobs must continue — otherwise Stripe retries pile up
@@ -13,6 +19,7 @@ const MAINTENANCE_ALLOWLIST = [
   '/api/stripe/webhook',
   '/api/vapi/webhook',
   '/api/cron/',
+  '/api/csp-report',
   '/_next/',
   '/favicon.ico',
   '/robots.txt',
@@ -69,7 +76,30 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  return await updateSession(request);
+  // Run the Supabase session refresh first so we get the response we'd
+  // normally return. Then layer CSP nonce headers on top if enabled.
+  const sessionResponse = await updateSession(request);
+
+  if (isCspNonceEnabled()) {
+    const nonce = generateNonce();
+    const csp = buildCsp({
+      nonce,
+      reportEndpoint: '/api/csp-report',
+    });
+
+    // Forward the nonce to the rendering layer via a request header.
+    // app/layout.tsx reads `headers().get('x-nonce')` so server
+    // components can pass it to <Script nonce={…}> components.
+    //
+    // We attach the header to BOTH the inbound request (so server
+    // components see it during render) AND the outbound response (so
+    // the browser receives the CSP). The inbound trick is documented
+    // in Next's official CSP guide.
+    sessionResponse.headers.set('x-nonce', nonce);
+    sessionResponse.headers.set(cspHeaderName(), csp);
+  }
+
+  return sessionResponse;
 }
 
 export const config = {

@@ -5,7 +5,13 @@
 // error message when one was supplied (server-trusted, not URL-injectable
 // for arbitrary HTML since we render it as text).
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
+
+export const metadata: Metadata = {
+  title: 'Sign-in failed',
+  robots: { index: false, follow: false },
+};
 
 type SearchParams = { [key: string]: string | string[] | undefined };
 

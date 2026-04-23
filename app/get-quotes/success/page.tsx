@@ -39,6 +39,7 @@
 //   - The "in motion" state adds a subtle SVG dotted route as a visual
 //     metaphor for "we're working on it". Respects reduced-motion.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -46,6 +47,13 @@ import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
 import { maskEmail } from '@/lib/text/pii';
+
+// Post-payment confirmation is user-specific and keyed on a session_id
+// or request UUID — not a page we want in search.
+export const metadata: Metadata = {
+  title: 'Quote request received',
+  robots: { index: false, follow: false },
+};
 
 type Props = {
   searchParams: { session_id?: string; request?: string };

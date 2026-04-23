@@ -12,7 +12,12 @@
 // list" is the same outcome either way.
 
 import { z } from 'zod';
+import { headers } from 'next/headers';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('joinWaitlist');
 
 export type WaitlistResult =
   | { ok: true; alreadyOnList: boolean }
@@ -30,6 +35,22 @@ const WaitlistSchema = z.object({
 });
 
 export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
+  // Rate limit: 5 signups per minute per IP. The endpoint returns "already
+  // on list" silently on dup-insert, so a scraper can't distinguish new
+  // signups from repeats — but we still don't want a firehose overwhelming
+  // us. Tight limit is appropriate: a real user hits this once, then maybe
+  // once more if they mistype.
+  const rl = rateLimit(clientKeyFromHeaders(headers(), 'waitlist'), {
+    limit: 5,
+    windowMs: 60_000,
+  });
+  if (!rl.ok) {
+    return {
+      ok: false,
+      error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
+    };
+  }
+
   const parsed = WaitlistSchema.safeParse(raw);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
@@ -48,7 +69,7 @@ export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
     .maybeSingle();
 
   if (catErr || !category) {
-    console.error('[joinWaitlist] unknown category', categorySlug, catErr);
+    log.error('unknown category', { categorySlug, err: catErr });
     return { ok: false, error: 'That category isn\'t available yet.' };
   }
 
@@ -63,7 +84,7 @@ export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
     if ((insertErr as { code?: string }).code === '23505') {
       return { ok: true, alreadyOnList: true };
     }
-    console.error('[joinWaitlist] insert failed', insertErr);
+    log.error('insert failed', { err: insertErr, categorySlug });
     return { ok: false, error: 'Could not save you to the waitlist. Try again?' };
   }
 

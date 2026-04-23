@@ -11,6 +11,9 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import type { User } from '@supabase/supabase-js';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('auth');
 
 export type Profile = {
   id: string;
@@ -49,7 +52,7 @@ export async function getProfile(): Promise<Profile | null> {
     // Profile row is created by a DB trigger on auth.users insert, so
     // this should never happen in normal flow. Log and surface as null
     // — the caller decides what to do.
-    console.error('[getProfile] failed to fetch profile for', user.id, error);
+    log.error('failed to fetch profile', { userId: user.id, err: error.message });
     return null;
   }
 

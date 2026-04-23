@@ -32,6 +32,9 @@ import {
   type ContactReleaseInput,
 } from '@/lib/email/templates';
 import { revalidatePath } from 'next/cache';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('releaseContact');
 
 export type ReleaseContactResult =
   | { ok: true; alreadyReleased: boolean; releaseId: string }
@@ -64,7 +67,7 @@ export async function releaseContactToBusiness(
     .eq('id', quoteId)
     .maybeSingle();
   if (ownedErr) {
-    console.error('[releaseContact] ownership check failed', ownedErr);
+    log.error('ownership check failed', { err: ownedErr, quoteId });
     return { ok: false, error: 'Could not verify this quote' };
   }
   if (!owned) {
@@ -110,7 +113,7 @@ export async function releaseContactToBusiness(
     .eq('id', quoteId)
     .single();
   if (quoteErr || !quote) {
-    console.error('[releaseContact] quote load failed', quoteErr);
+    log.error('quote load failed', { err: quoteErr, quoteId });
     return { ok: false, error: 'Could not load the quote' };
   }
 
@@ -129,7 +132,7 @@ export async function releaseContactToBusiness(
     .eq('id', quote.quote_request_id)
     .single();
   if (reqErr || !request) {
-    console.error('[releaseContact] request load failed', reqErr);
+    log.error('request load failed', { err: reqErr, requestId: quote.quote_request_id });
     return { ok: false, error: 'Could not load the request' };
   }
 
@@ -145,13 +148,13 @@ export async function releaseContactToBusiness(
     .eq('id', quote.business_id)
     .single();
   if (bizErr || !business) {
-    console.error('[releaseContact] business load failed', bizErr);
+    log.error('business load failed', { err: bizErr, businessId: quote.business_id });
     return { ok: false, error: 'Could not load the business' };
   }
   if (!business.email) {
     // Can't forward a lead without an email address. Non-fatal to the
     // user but there's nothing we can do here — flag it and bail.
-    console.warn('[releaseContact] business has no email', business.id);
+    log.warn('business has no email', { businessId: business.id });
     return {
       ok: false,
       error: 'This pro does not have an email on file — support can help.',
@@ -166,10 +169,9 @@ export async function releaseContactToBusiness(
   const customerPhone = stringOrNull(intake['contact_phone']);
   const customerEmail = stringOrNull(intake['contact_email']);
   if (!customerName || !customerPhone || !customerEmail) {
-    console.warn(
-      '[releaseContact] intake missing contact fields',
-      quote.quote_request_id
-    );
+    log.warn('intake missing contact fields', {
+      requestId: quote.quote_request_id,
+    });
     return {
       ok: false,
       error: 'Your contact info is missing from the request — please contact support.',
@@ -234,7 +236,8 @@ export async function releaseContactToBusiness(
   if (auditErr) {
     // Email went out; audit row failed. Loud log so ops notices — we
     // can reconcile against Resend's send logs.
-    console.error('[releaseContact] audit insert failed', auditErr, {
+    log.error('audit insert failed', {
+      err: auditErr,
       quoteId,
       sendId: send.id,
     });
@@ -245,7 +248,7 @@ export async function releaseContactToBusiness(
     .update({ contact_released_at: new Date().toISOString() })
     .eq('id', quote.id);
   if (stampErr) {
-    console.error('[releaseContact] stamp failed', stampErr, { quoteId });
+    log.error('stamp failed', { err: stampErr, quoteId });
   }
 
   // Refresh the request detail page so the button flips to "shared".

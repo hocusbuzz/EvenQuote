@@ -4,7 +4,14 @@
 // the user's next action is in their inbox, not here. The "resend" link
 // sends them back to /login to try again.
 
+import type { Metadata } from 'next';
 import Link from 'next/link';
+
+// Ephemeral transactional page — don't let it show up in search results.
+export const metadata: Metadata = {
+  title: 'Check your email',
+  robots: { index: false, follow: false },
+};
 
 export default function CheckEmailPage() {
   return (

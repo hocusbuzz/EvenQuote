@@ -30,6 +30,10 @@ import { z } from 'zod';
 import { headers } from 'next/headers';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getStripe, QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
+import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('createCheckoutSession');
 
 const Input = z.object({
   requestId: z.string().uuid('Invalid request id'),
@@ -53,6 +57,20 @@ function getSiteUrl(): string {
 export async function createCheckoutSession(
   raw: unknown
 ): Promise<CheckoutResult> {
+  // Rate limit: 20/min/IP. Checkout creation hits Stripe on every call
+  // and Stripe's own API limits us to 100 req/sec account-wide, so
+  // capping per-IP here shields us from one ambitious tab.
+  const rl = rateLimit(clientKeyFromHeaders(headers(), 'checkout'), {
+    limit: 20,
+    windowMs: 60_000,
+  });
+  if (!rl.ok) {
+    return {
+      ok: false,
+      error: `Too many checkout attempts. Try again in ${rl.retryAfterSec}s.`,
+    };
+  }
+
   const parsed = Input.safeParse(raw);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' };
@@ -141,7 +159,7 @@ export async function createCheckoutSession(
 
     return { ok: true, url: session.url };
   } catch (err) {
-    console.error('[createCheckoutSession] Stripe error', err);
+    log.error('Stripe error', { err });
     return { ok: false, error: 'Could not start checkout. Please try again.' };
   }
 }

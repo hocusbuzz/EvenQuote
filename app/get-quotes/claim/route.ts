@@ -23,6 +23,9 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('get-quotes/claim');
 
 export const dynamic = 'force-dynamic';
 
@@ -97,7 +100,9 @@ export async function GET(request: NextRequest) {
 
   if (intakeEmail !== userEmail) {
     // Signed-in user != the email used at intake. Refuse.
-    console.warn('[get-quotes/claim] email mismatch', {
+    // Logger redacts emails — we want just enough signal (user id, request
+    // id) to investigate without writing full addresses to log storage.
+    log.warn('email mismatch — claim refused', {
       requestId,
       userId: user.id,
       userEmail,
@@ -123,7 +128,10 @@ export async function GET(request: NextRequest) {
       .is('user_id', null);
 
     if (reqUpdErr) {
-      console.error('[get-quotes/claim] quote_requests backfill failed', reqUpdErr);
+      log.error('quote_requests backfill failed', {
+        requestId,
+        err: reqUpdErr.message,
+      });
       return errorRedirect(origin, 'Could not link your account — please contact support', requestId);
     }
   }
@@ -140,7 +148,10 @@ export async function GET(request: NextRequest) {
   if (payUpdErr) {
     // Not fatal — the request is already linked to the user, the payment
     // row is still valid. Log and continue.
-    console.error('[get-quotes/claim] payments backfill failed', payUpdErr);
+    log.error('payments backfill failed', {
+      requestId,
+      err: payUpdErr.message,
+    });
   }
 
   // 6. Off to the happy-path success page. With user_id now populated,
