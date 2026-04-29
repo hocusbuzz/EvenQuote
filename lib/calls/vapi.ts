@@ -270,6 +270,15 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
       const wrapped = new Error(
         `Vapi startCall failed: ${res.status} ${res.statusText}: ${text.slice(0, 500)}`
       );
+      // Also log to console so the failure is visible in Vercel logs
+      // (Sentry is a no-op stub until the SDK lands). Without this,
+      // dispatch failures are completely silent in prod.
+      log.error('vapi startCall http failure', {
+        status: res.status,
+        statusText: res.statusText,
+        body: text.slice(0, 500),
+        businessId: input.metadata.business_id,
+      });
       captureException(wrapped, {
         tags: {
           ...baseCaptureTags,
@@ -288,6 +297,9 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
     if (!json.id) {
       // 2xx with no id — contract violation. Page us on first occurrence.
       const wrapped = new Error('Vapi startCall failed: response missing call id');
+      log.error('vapi startCall missing id', {
+        businessId: input.metadata.business_id,
+      });
       captureException(wrapped, {
         tags: { ...baseCaptureTags, reason: 'startCallMissingId' },
       });
@@ -303,6 +315,10 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
     // Transport layer: DNS / TLS / socket / timeout. Wrap the non-Error
     // case so the tracker always sees a real stack trace.
     const wrapped = err instanceof Error ? err : new Error(String(err));
+    log.error('vapi startCall transport failure', {
+      message: wrapped.message,
+      businessId: input.metadata.business_id,
+    });
     captureException(wrapped, {
       tags: { ...baseCaptureTags, reason: 'startCallTransportFailed' },
     });
