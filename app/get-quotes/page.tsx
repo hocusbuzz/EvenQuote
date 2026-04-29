@@ -19,6 +19,15 @@ export const metadata = {
   description: 'Pick a service. We\'ll call local pros and send you the numbers.',
 };
 
+// Render per-request so adding/disabling a service_categories row reflects
+// immediately without needing a redeploy. Without this, Next.js may
+// statically generate the page at build time — and if the build sandbox
+// can't reach Supabase (or the table was empty at deploy time), every
+// future request serves an empty grid even after rows are seeded.
+// Discovered during launch when the deploy succeeded but the page rendered
+// no service cards despite 4 active rows in the DB.
+export const dynamic = 'force-dynamic';
+
 // These slugs render a live intake form; everything else renders the
 // waitlist capture. Keep in sync with app/get-quotes/[category]/page.tsx.
 const LIVE_SLUGS = new Set(['moving', 'cleaning']);
