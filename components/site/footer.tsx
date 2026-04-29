@@ -75,7 +75,21 @@ export function SiteFooter() {
         </div>
 
         <div className="mt-16 flex flex-col items-start justify-between gap-4 border-t border-cream/10 pt-8 font-mono text-xs text-cream/50 sm:flex-row sm:items-center">
-          <p>© {year} EvenQuote. All rights reserved.</p>
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-4">
+            <p>© {year} EvenQuote · Hocusbuzz LLC</p>
+            <span className="hidden sm:inline" aria-hidden>
+              ·
+            </span>
+            <Link href="/legal/privacy" className="hover:text-lime">
+              Privacy
+            </Link>
+            <span className="hidden sm:inline" aria-hidden>
+              ·
+            </span>
+            <Link href="/legal/terms" className="hover:text-lime">
+              Terms
+            </Link>
+          </div>
           <p className="uppercase tracking-widest">v0.1 — pre-launch</p>
         </div>
       </div>

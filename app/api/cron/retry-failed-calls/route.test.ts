@@ -202,3 +202,84 @@ describe('response envelope invariants — /api/cron/retry-failed-calls', () => 
     }
   });
 });
+
+// ── captureException tag-shape lockdown ────────────────────────────
+// When the worker throws, the handler routes the error to Sentry with
+// `{ route: 'cron/retry-failed-calls' }` tags. A silent rename of
+// the tag key would break Sentry's indexed search; stuffing the raw
+// error or a phone/email into the tag value would leak PII.
+//
+// The earlier envelope-shape tests above already use the full suite
+// of Supabase-throw scenarios; we add a thin companion that asserts
+// the capture tag shape on ONE of those scenarios.
+describe('captureException tag shape — cron/retry-failed-calls', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.CRON_SECRET = 'shh';
+  });
+
+  it('fires capture with canonical tags + no PII when worker throws', async () => {
+    vi.resetModules();
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    vi.doMock('@/lib/supabase/admin', () => ({
+      createAdminClient: () => ({
+        from: () => {
+          throw new Error('db reset — contact=biz@example.com +14155550199');
+        },
+      }),
+    }));
+
+    const mod = await import('./route');
+    const req = new Request('http://localhost/api/cron/retry-failed-calls', {
+      headers: { 'x-cron-secret': 'shh' },
+    });
+    const res = await mod.GET(req);
+    expect(res.status).toBe(500);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    // Canonical tag shape lockdown.
+    expect(ctx).toEqual({
+      tags: { route: 'cron/retry-failed-calls', reason: 'runFailed' },
+    });
+    // The tag VALUES must never carry contact strings — even though
+    // the error MESSAGE does, the tag bag is opaque.
+    for (const v of Object.values((ctx as { tags: Record<string, string> }).tags)) {
+      expect(v).not.toMatch(/@/);
+      expect(v).not.toMatch(/\+?\d{10,}/);
+    }
+  });
+
+  it('regression-guard: reason tag is a discrete, allow-listed value', async () => {
+    vi.resetModules();
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    vi.doMock('@/lib/supabase/admin', () => ({
+      createAdminClient: () => ({
+        from: () => {
+          throw new Error('boom');
+        },
+      }),
+    }));
+    const mod = await import('./route');
+    await mod.GET(
+      new Request('http://localhost/api/cron/retry-failed-calls', {
+        headers: { 'x-cron-secret': 'shh' },
+      })
+    );
+    const ALLOWED = new Set(['runFailed']);
+    for (const [, ctx] of captureExceptionMock.mock.calls) {
+      const reason = (ctx as { tags?: Record<string, string> })?.tags?.reason;
+      expect(reason, 'reason tag present').toBeTruthy();
+      expect(ALLOWED.has(String(reason))).toBe(true);
+    }
+  });
+});

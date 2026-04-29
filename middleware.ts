@@ -1,5 +1,41 @@
 // Root middleware. Replaces the Phase 1 stub.
 // All the logic lives in lib/supabase/middleware.ts so it's testable.
+//
+// ── Observability contract (R34 audit) ────────────────────────────
+// This file deliberately does NOT wire captureException/captureMessage
+// on any path. Reasoning, in priority order:
+//   1. Request-frequency flood. Middleware runs on EVERY matched
+//      request (the matcher excludes only static/image/file-extension
+//      paths — every API route, every page render, every asset refresh
+//      traverses this code). A capture call here is multiplied by the
+//      entire traffic firehose; a misbehaving edge-runtime shim would
+//      blow the Sentry quota in seconds. Uptime dashboards + Vercel's
+//      platform-level error capture already surface middleware crashes
+//      without per-request amplification.
+//   2. Platform-level instrumentation owns middleware errors. Next's
+//      `instrumentation.ts` boot hook + `@sentry/nextjs`'s middleware
+//      wrapper (once DSN unlocks) already install a top-level capture
+//      around the exported `middleware` function. Adding our own
+//      captureException inside the handler would double-capture the
+//      same throw with a different stack trace — R26 no-double-capture
+//      rule.
+//   3. Session refresh errors are steady-state, not incidents.
+//      `updateSession()` hitting a transient Supabase cookie-refresh
+//      error recovers on the next request; capturing at every stale-
+//      token edge flood would drown out real anomalies.
+//   4. CSP nonce generation is pure (`crypto.randomUUID()`) and cannot
+//      throw at the application layer. The maintenance-mode gate is
+//      pure URL manipulation and also cannot throw.
+//   5. Cookie-decode errors are noisy and user-caused (stale browser
+//      cookies, clock skew, third-party devtools). Not actionable at
+//      the capture site — they're a UX signal, not an incident signal.
+//
+// Regression guards in tests/middleware.test.ts lock this no-capture
+// contract — if a future maintainer wires captureException here, the
+// "observability contract — no capture" block fails. If you need to
+// break the rule (e.g. a genuinely rare, bounded-frequency middleware
+// path worth paging on), update the test AND leave a justification
+// comment on the new capture site.
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';

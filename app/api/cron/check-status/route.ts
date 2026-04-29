@@ -28,34 +28,17 @@
 import { NextResponse } from 'next/server';
 import { checkStripe, checkVapi } from '@/app/api/status/route';
 import { createLogger } from '@/lib/logger';
+import { assertCronAuth } from '@/lib/security/cron-auth';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('cron/check-status');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-function extractSecret(req: Request): string {
-  return (
-    req.headers.get('x-cron-secret') ??
-    req.headers.get('X-Cron-Secret') ??
-    (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '')
-  );
-}
-
 async function handle(req: Request) {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, error: 'CRON_SECRET not configured' },
-      { status: 500 }
-    );
-  }
-  if (extractSecret(req) !== expected) {
-    return NextResponse.json(
-      { ok: false, error: 'unauthorized' },
-      { status: 401 }
-    );
-  }
+  const deny = assertCronAuth(req);
+  if (deny) return deny;
 
   const [stripe, vapi] = await Promise.all([checkStripe(), checkVapi()]);
 
@@ -72,6 +55,26 @@ async function handle(req: Request) {
       vapi: vapi.outcome,
       errors,
     });
+    // Route to Sentry with the canonical `{ route }` tag shape used by
+    // the other /api/cron/* handlers. We synthesize a new Error because
+    // `fail` probes don't throw — they return structured outcomes.
+    // Including the failing integration in tags lets on-call filter
+    // by surface (stripe vs. vapi) without grepping the message body.
+    // PII-safe: the outcome strings are 'ok'|'skip'|'fail' literals,
+    // not contact data, so forwarding them as tags is safe.
+    captureException(
+      new Error(
+        `cron/check-status: integration probe failed — stripe=${stripe.outcome} vapi=${vapi.outcome}`
+      ),
+      {
+        tags: {
+          route: 'cron/check-status',
+          reason: 'integrationProbeFailed',
+          stripe: stripe.outcome,
+          vapi: vapi.outcome,
+        },
+      }
+    );
   }
 
   return NextResponse.json(

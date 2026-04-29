@@ -279,7 +279,7 @@ export default async function SuccessPage({ searchParams }: Props) {
               <p className="mt-3 text-muted-foreground relative z-10">
                 We&rsquo;ll start calling {noun} in{' '}
                 <span className="font-semibold text-foreground">
-                  {state.city}, {state.state}
+                  {titleCaseCity(state.city)}, {state.state}
                 </span>{' '}
                 shortly. You&rsquo;ll get an email with the side-by-side quote report within 24 hours.
               </p>
@@ -301,7 +301,7 @@ export default async function SuccessPage({ searchParams }: Props) {
               <div className="mt-6 rounded-md border border-border bg-muted/40 p-4 text-sm relative z-10">
                 <p className="font-semibold text-foreground">What happens next</p>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
-                  <li>We call up to 20 local {noun} on your behalf.</li>
+                  <li>We call up to 10 local {noun} on your behalf.</li>
                   <li>Each call is recorded and transcribed.</li>
                   <li>We extract pricing, availability, and notes.</li>
                   <li>You get a single report to compare — no phone tag.</li>
@@ -431,4 +431,23 @@ function DottedRoute() {
       </div>
     </div>
   );
+}
+
+/**
+ * Title-case a user-entered city string so "carsbad" → "Carsbad" and
+ * "SAN DIEGO" → "San Diego". Intake form doesn't normalize on input —
+ * whatever the customer typed lands in intake_data.contact_city.
+ * We fix the display side so it looks presentable without overwriting
+ * their original entry. Collapses internal whitespace too.
+ */
+function titleCaseCity(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .trim()
+    .split(/\s+/)
+    .map((word) => {
+      if (word.length === 0) return '';
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
 }

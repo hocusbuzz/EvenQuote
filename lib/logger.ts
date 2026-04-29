@@ -67,12 +67,48 @@ function redactDeep(value: unknown): unknown {
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
+/**
+ * Decide whether an `err` value is substantive enough to fingerprint.
+ *
+ * We want to auto-fingerprint real error objects and error-shaped plain
+ * objects (for errors that crossed a Promise.reject boundary and lost
+ * their prototype). We explicitly skip `null` / `undefined` / empty
+ * strings because fingerprinting those produces the same degenerate
+ * hash across unrelated call sites and adds noise to log grouping.
+ *
+ * Strings are fingerprinted — a fingerprint on a plain string err
+ * isn't useful for stack-shape grouping (the string has no stack)
+ * but staying consistent is less surprising than silent omission.
+ */
+function shouldFingerprint(err: unknown): boolean {
+  if (err === null || err === undefined) return false;
+  if (typeof err === 'string' && err.length === 0) return false;
+  return true;
+}
+
 function emit(level: Level, ns: string, msg: string, ctx?: LogContext): void {
+  // Auto-fingerprint: if ctx has a substantive `err` and no explicit
+  // `fingerprint` was set, compute one and lift it to the top-level
+  // payload. Top-level so monitors can grep a single key; not nested
+  // so it survives even if someone later spreads `ctx` into something.
+  // Respects explicit `fingerprint` overrides (callers that know
+  // better can keep their own ids).
+  let autoFingerprint: string | undefined;
+  if (ctx && 'err' in ctx && shouldFingerprint(ctx.err)) {
+    const explicit = ctx.fingerprint;
+    if (typeof explicit === 'string' && explicit.length > 0) {
+      autoFingerprint = explicit;
+    } else {
+      autoFingerprint = fingerprintError(ctx.err);
+    }
+  }
+
   const payload = {
     ts: new Date().toISOString(),
     level,
     ns,
     msg: redactPII(msg),
+    ...(autoFingerprint ? { fingerprint: autoFingerprint } : {}),
     ...(ctx ? { ctx: redactDeep(ctx) as LogContext } : {}),
   };
   // Send to stdout/stderr via console. Vercel picks that up as-is.

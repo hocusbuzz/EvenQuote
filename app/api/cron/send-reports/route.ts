@@ -15,6 +15,8 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { sendPendingReports } from '@/lib/cron/send-reports';
 import { createLogger } from '@/lib/logger';
+import { assertCronAuth } from '@/lib/security/cron-auth';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('cron/send-reports');
 
@@ -29,20 +31,8 @@ export async function GET(req: Request) {
 }
 
 async function handle(req: Request) {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    return Response.json(
-      { ok: false, error: 'CRON_SECRET not configured' },
-      { status: 500 }
-    );
-  }
-  const provided =
-    req.headers.get('x-cron-secret') ??
-    req.headers.get('X-Cron-Secret') ??
-    (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
-  if (provided !== expected) {
-    return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
-  }
+  const deny = assertCronAuth(req);
+  if (deny) return deny;
 
   const admin = createAdminClient();
   try {
@@ -50,6 +40,13 @@ async function handle(req: Request) {
     return Response.json(result);
   } catch (err) {
     log.error('run failed', { err });
+    // Canonical cron tag shape: { route: 'cron/<name>', reason }. Only
+    // one capture site in this file today, but locking `reason` now
+    // means a future second site (e.g. per-report send failure) can
+    // grow in without renaming the existing facet.
+    captureException(err, {
+      tags: { route: 'cron/send-reports', reason: 'runFailed' },
+    });
     return Response.json(
       {
         ok: false,

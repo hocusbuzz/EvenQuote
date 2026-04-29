@@ -252,3 +252,104 @@ describe('response envelope invariants — /api/cron/check-status', () => {
     }
   });
 });
+
+// ── captureException tag-shape lockdown ────────────────────────────
+// check-status was the odd one out among /api/cron/* — it didn't fire
+// captureException on degraded outcomes. Now added: a synthetic Error
+// is captured with canonical `{ route, stripe, vapi }` tags so on-call
+// gets paged through Sentry the same way the other cron jobs do.
+//
+// The probe outcome values ('ok'|'skip'|'fail') are literal strings,
+// not contact data, so forwarding them as tag values is safe. PII
+// guards remain in place in case a future refactor widens that set.
+describe('captureException tag shape — cron/check-status', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockCheckStripe.mockReset();
+    mockCheckVapi.mockReset();
+    env.CRON_SECRET = 'cron_test_secret';
+  });
+
+  it('fires capture with canonical tags when a probe returns fail', async () => {
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    mockCheckStripe.mockResolvedValue({ outcome: 'fail', message: 'bad key' });
+    mockCheckVapi.mockResolvedValue({ outcome: 'ok' });
+
+    const { GET } = await loadRoute();
+    const res = await GET(makeReq({ 'x-cron-secret': 'cron_test_secret' }));
+    expect(res.status).toBe(503);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/stripe=fail/);
+    expect(ctx).toEqual({
+      tags: {
+        route: 'cron/check-status',
+        reason: 'integrationProbeFailed',
+        stripe: 'fail',
+        vapi: 'ok',
+      },
+    });
+    // PII guard — tag values are literal outcome strings, never contact
+    // data. Keep the guard in case a future change broadens the set.
+    for (const v of Object.values((ctx as { tags: Record<string, string> }).tags)) {
+      expect(v).not.toMatch(/@/);
+      expect(v).not.toMatch(/\+?\d{10,}/);
+    }
+  });
+
+  it('does NOT fire capture on the happy path (both ok)', async () => {
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    mockCheckStripe.mockResolvedValue({ outcome: 'ok' });
+    mockCheckVapi.mockResolvedValue({ outcome: 'ok' });
+
+    const { GET } = await loadRoute();
+    const res = await GET(makeReq({ 'x-cron-secret': 'cron_test_secret' }));
+    expect(res.status).toBe(200);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT fire capture when an integration is merely skipped', async () => {
+    // Preview envs with no VAPI_API_KEY return 'skip'. Skip is
+    // healthy — no Sentry event should fire.
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    mockCheckStripe.mockResolvedValue({ outcome: 'ok' });
+    mockCheckVapi.mockResolvedValue({ outcome: 'skip' });
+
+    const { GET } = await loadRoute();
+    const res = await GET(makeReq({ 'x-cron-secret': 'cron_test_secret' }));
+    expect(res.status).toBe(200);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('regression-guard: reason tag is a discrete, allow-listed value', async () => {
+    const captureExceptionMock = vi.fn();
+    vi.doMock('@/lib/observability/sentry', () => ({
+      captureException: (err: unknown, ctx?: unknown) =>
+        captureExceptionMock(err, ctx),
+    }));
+    mockCheckStripe.mockResolvedValue({ outcome: 'fail', message: 'x' });
+    mockCheckVapi.mockResolvedValue({ outcome: 'fail', message: 'y' });
+    const { GET } = await loadRoute();
+    await GET(makeReq({ 'x-cron-secret': 'cron_test_secret' }));
+    const ALLOWED = new Set(['integrationProbeFailed']);
+    for (const [, ctx] of captureExceptionMock.mock.calls) {
+      const reason = (ctx as { tags?: Record<string, string> })?.tags?.reason;
+      expect(reason, 'reason tag present').toBeTruthy();
+      expect(ALLOWED.has(String(reason))).toBe(true);
+    }
+  });
+});

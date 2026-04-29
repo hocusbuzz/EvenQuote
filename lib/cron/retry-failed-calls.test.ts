@@ -21,6 +21,15 @@ vi.mock('@/lib/calls/vapi', () => ({
   startOutboundCall: (...args: unknown[]) => startOutboundSpy(...args),
 }));
 
+// R27 capture-site audit: stub Sentry at the module boundary so tests
+// can assert canonical `{lib:'cron-retry-failed-calls', reason}` tag
+// shapes. Mock is hoisted above the import under test.
+const captureExceptionSpy = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (...args: unknown[]) => captureExceptionSpy(...args),
+  captureMessage: vi.fn(),
+}));
+
 // Import after the mock is registered.
 import { retryFailedCalls } from './retry-failed-calls';
 
@@ -122,15 +131,43 @@ function makeAdmin(initial: Partial<StubState> = {}): {
           };
           return api;
         },
-        update: (payload: Record<string, unknown>) => ({
-          eq: (_col: string, id: string) => {
+        update: (payload: Record<string, unknown>) => {
+          // Two chain shapes both terminate here:
+          //
+          //   1. Direct fire-and-forget:   .update(...).eq('id', X)
+          //      → resolves to { error }.
+          //
+          //   2. CAS-guarded write (R47.4):
+          //      .update(...).eq('id', X).eq('retry_count', N)
+          //      → resolves the same way; the CAS column doesn't
+          //        change semantics for the mock.
+          const finalize = (id: string) => {
             state.callsUpdates.push({ id, payload });
             return Promise.resolve({
               data: null,
               error: state.callsUpdateError,
             });
-          },
-        }),
+          };
+          return {
+            eq: (col: string, val: unknown) => {
+              if (col === 'id') {
+                const id = val as string;
+                const terminator: Record<string, unknown> = {
+                  // CAS chain: second .eq() returns the resolved
+                  // promise. Awaiting `.eq().eq()` is fine because
+                  // promises chain through the .then on the result.
+                  eq: (_col2: string, _val2: unknown) => finalize(id),
+                  // Direct chain: bare .then so awaiting after the
+                  // single .eq() works.
+                  then: (resolve: (v: unknown) => unknown) =>
+                    finalize(id).then(resolve),
+                };
+                return terminator;
+              }
+              return finalize('');
+            },
+          };
+        },
       };
     },
     rpc: (fn: string, args: unknown) => {
@@ -178,6 +215,7 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
 describe('retryFailedCalls', () => {
   beforeEach(() => {
     startOutboundSpy.mockReset();
+    captureExceptionSpy.mockReset();
   });
 
   it('returns zero counts when there are no candidates', async () => {
@@ -194,7 +232,7 @@ describe('retryFailedCalls', () => {
     expect(startOutboundSpy).not.toHaveBeenCalled();
   });
 
-  it('applies the correct candidate query — status, started_at null, retry_count<3, 24h window', async () => {
+  it('applies the correct candidate query — status, started_at null, retry_count<1, 24h window', async () => {
     const { admin, state } = makeAdmin({ candidates: [] });
     await retryFailedCalls(admin);
 
@@ -202,8 +240,12 @@ describe('retryFailedCalls', () => {
       status: 'failed',
     });
     expect(state.capturedCallsQuery.isNullCols).toContain('started_at');
+    // Cost control: cap total attempts per business at 2 (initial
+    // dispatch + 1 retry). Was retry_count<3 pre-launch — dropped to <1
+    // after per-call spend audit showed dispatch retries were a minor
+    // share of overall cost while eating margin.
     expect(state.capturedCallsQuery.ltFilters).toMatchObject({
-      retry_count: 3,
+      retry_count: 1,
     });
     // 24h window: gte on created_at with an ISO string roughly 24h ago.
     const windowStart = state.capturedCallsQuery.gteFilters['created_at'];
@@ -272,7 +314,7 @@ describe('retryFailedCalls', () => {
       vapiCallId: 'vapi_new_xyz',
     });
     const { admin, state } = makeAdmin({
-      candidates: [candidate({ retry_count: 1 })],
+      candidates: [candidate({ retry_count: 0 })],
     });
 
     const result = await retryFailedCalls(admin);
@@ -289,7 +331,7 @@ describe('retryFailedCalls', () => {
     expect(args.metadata.call_id).toBe('call_1');
     expect(args.metadata.quote_request_id).toBe('qr_1');
     expect(args.metadata.business_id).toBe('biz_1');
-    expect(args.metadata.retry_attempt).toBe('2');
+    expect(args.metadata.retry_attempt).toBe('1');
 
     // variableValues strip business-reachable keys (contact_email, contact_phone) and
     // flatten arrays/primitives. Source intake has both PII keys plus tags as array.
@@ -301,17 +343,25 @@ describe('retryFailedCalls', () => {
     expect(args.variableValues.contact_email).toBeUndefined();
     expect(args.variableValues.contact_phone).toBeUndefined();
 
-    // Row update: status flipped, new vapi_call_id, retry_count+1,
-    // last_retry_at populated.
-    expect(state.callsUpdates).toHaveLength(1);
+    // R47.4 — TWO row updates:
+    //   1. Pre-mark BEFORE dialing: retry_count + last_retry_at.
+    //      Throttle gate so a worst-case "dial succeeded but every
+    //      subsequent write failed" scenario doesn't double-dial on
+    //      the next cron tick.
+    //   2. Post-dispatch on success: status='in_progress' +
+    //      vapi_call_id + started_at.
+    expect(state.callsUpdates).toHaveLength(2);
     expect(state.callsUpdates[0].id).toBe('call_1');
     expect(state.callsUpdates[0].payload).toMatchObject({
+      retry_count: 1,
+    });
+    expect(state.callsUpdates[0].payload.last_retry_at).toBeDefined();
+    expect(state.callsUpdates[1].id).toBe('call_1');
+    expect(state.callsUpdates[1].payload).toMatchObject({
       status: 'in_progress',
       vapi_call_id: 'vapi_new_xyz',
-      retry_count: 2,
     });
-    expect(state.callsUpdates[0].payload.started_at).toBeDefined();
-    expect(state.callsUpdates[0].payload.last_retry_at).toBeDefined();
+    expect(state.callsUpdates[1].payload.started_at).toBeDefined();
 
     // No apply_call_end yet — we haven't exhausted retries.
     expect(
@@ -319,7 +369,10 @@ describe('retryFailedCalls', () => {
     ).toHaveLength(0);
   });
 
-  it('failed retry: leaves status=failed, bumps retry_count + last_retry_at, records note', async () => {
+  it('exhaustion: a failed retry pushes retry_count to 1 and fires apply_call_end with p_quote_inserted=false', async () => {
+    // Under the 2-total-attempts cap, any failed retry IS the
+    // exhaustion: retry_count 0 → 1 hits the ceiling. There's no
+    // intermediate "bumped retry_count but not yet exhausted" state.
     startOutboundSpy.mockResolvedValue({
       ok: false,
       simulated: false,
@@ -334,52 +387,24 @@ describe('retryFailedCalls', () => {
     expect(result.failed).toBe(1);
     expect(result.succeeded).toBe(0);
     expect(state.callsUpdates).toHaveLength(1);
-    // Payload for failed retry should ONLY touch retry_count + last_retry_at.
-    expect(state.callsUpdates[0].payload).toMatchObject({
-      retry_count: 1,
-      last_retry_at: expect.any(String),
-    });
-    // status and vapi_call_id must NOT be set on the failure path.
-    expect(state.callsUpdates[0].payload.status).toBeUndefined();
-    expect(state.callsUpdates[0].payload.vapi_call_id).toBeUndefined();
+    expect(state.callsUpdates[0].payload.retry_count).toBe(1);
+    expect(state.callsUpdates[0].payload.last_retry_at).toEqual(expect.any(String));
 
-    // apply_call_end must NOT fire — retry_count is 1, not yet 3.
-    expect(
-      state.rpcCalls.filter((c) => c.fn === 'apply_call_end')
-    ).toHaveLength(0);
-
-    expect(result.notes.join(' ')).toMatch(/HTTP 502/);
-  });
-
-  it('exhaustion: when retry pushes retry_count to 3, fires apply_call_end with p_quote_inserted=false', async () => {
-    startOutboundSpy.mockResolvedValue({
-      ok: false,
-      simulated: false,
-      error: 'peer unreachable',
-    });
-    // retry_count=2, so this failure makes it 3 → exhausted.
-    const { admin, state } = makeAdmin({
-      candidates: [candidate({ retry_count: 2 })],
-    });
-
-    const result = await retryFailedCalls(admin);
-
-    expect(result.failed).toBe(1);
-    expect(state.callsUpdates[0].payload.retry_count).toBe(3);
-
-    // apply_call_end must fire exactly once with the right args. This is
-    // the fix for the stuck-batch bug — without it, a permanently-dead
-    // number strands the whole quote_request in 'calling' forever.
+    // apply_call_end must fire exactly once with the right args. This
+    // is the fix for the stuck-batch bug — without it, a permanently-
+    // dead number strands the whole quote_request in 'calling' forever.
     const applyCalls = state.rpcCalls.filter(
       (c) => c.fn === 'apply_call_end'
     );
     expect(applyCalls).toHaveLength(1);
     expect(applyCalls[0].args).toEqual({
       p_request_id: 'qr_1',
+      p_call_id: 'call_1',
       p_quote_inserted: false,
     });
 
     expect(result.notes.join(' ')).toMatch(/exhausted/);
+    expect(result.notes.join(' ')).toMatch(/HTTP 502/);
   });
 
   it('apply_call_end failure on exhaustion is logged but does NOT throw', async () => {
@@ -389,7 +414,7 @@ describe('retryFailedCalls', () => {
       error: 'peer unreachable',
     });
     const { admin, state } = makeAdmin({
-      candidates: [candidate({ retry_count: 2 })],
+      candidates: [candidate({ retry_count: 0 })],
       applyCallEndError: { message: 'deadlock detected' },
     });
 
@@ -478,12 +503,11 @@ describe('retryFailedCalls', () => {
     expect(result.failed).toBe(1);
   });
 
-  it('records a note when the calls row update fails after a successful dispatch', async () => {
-    startOutboundSpy.mockResolvedValue({
-      ok: true,
-      simulated: false,
-      vapiCallId: 'vapi_zzz',
-    });
+  it('skips the dispatch entirely when the pre-mark write fails', async () => {
+    // R47.4: write order changed. The retry_count + last_retry_at
+    // pre-mark happens BEFORE the dispatch now, so an RLS denial
+    // here means we never call Vapi at all — better than letting
+    // a throttle-gate-less dispatch race on the next cron tick.
     const { admin, state } = makeAdmin({
       candidates: [candidate()],
       callsUpdateError: { message: 'RLS denied' },
@@ -491,10 +515,139 @@ describe('retryFailedCalls', () => {
 
     const result = await retryFailedCalls(admin);
 
-    // Dispatch succeeded — succeeded counter increments even though the
-    // row update failed. The note makes the discrepancy visible.
-    expect(result.succeeded).toBe(1);
-    expect(result.notes.join(' ')).toMatch(/dispatched but row update failed/);
+    // No dispatch attempted — the pre-mark write failed.
+    expect(startOutboundSpy).not.toHaveBeenCalled();
+    expect(result.succeeded).toBe(0);
+    expect(result.notes.join(' ')).toMatch(
+      /pre-mark write failed, skipping dispatch/
+    );
+    // Single update attempt (the failed pre-mark) was recorded.
     expect(state.callsUpdates).toHaveLength(1);
+  });
+
+  // ── R27: lib-level capture-site audit ────────────────────────────
+  //
+  // Two genuinely silent failure paths in this module pre-R27:
+  //
+  //   (a) candidateQueryFailed — the initial .select().eq().is()...
+  //       query returns `{ok:false, notes:[...]}` WITHOUT throwing.
+  //       The route handler at app/api/cron/retry-failed-calls/route.ts
+  //       wraps retryFailedCalls in try/catch, but ok:false does not
+  //       propagate as a throw → Sentry silent. An RLS drift on
+  //       `calls` or a table rename would stop the retry worker
+  //       indefinitely with zero pages.
+  //
+  //   (b) applyCallEndFailed — the exact "stuck-batch" bug the code's
+  //       own comments name. If apply_call_end for an exhausted row
+  //       errors, the quote_request sits in status='calling' forever,
+  //       send-reports never picks it up, customer paid and got nothing.
+  //
+  // Both now capture with `{lib:'cron-retry-failed-calls', reason}`.
+  // The allow-list is locked by the regression-guard test below.
+  describe('captureException tag shape (R27)', () => {
+    it('(a) candidate query error fires candidateQueryFailed with {lib, reason}', async () => {
+      const { admin } = makeAdmin({
+        candidatesError: { message: 'permission denied for table calls' },
+      });
+
+      const result = await retryFailedCalls(admin);
+      expect(result.ok).toBe(false);
+
+      expect(captureExceptionSpy).toHaveBeenCalledTimes(1);
+      const [err, ctx] = captureExceptionSpy.mock.calls[0];
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('permission denied for table calls');
+      expect(ctx).toEqual({
+        tags: {
+          lib: 'cron-retry-failed-calls',
+          reason: 'candidateQueryFailed',
+        },
+      });
+    });
+
+    it('(b) apply_call_end error on exhausted row fires applyCallEndFailed with callId + quoteRequestId', async () => {
+      // Setup: a candidate at retry_count=0 fails its retry attempt,
+      // tipping retry_count → 1 (the exhaustion threshold). The code
+      // then calls apply_call_end, which errors.
+      startOutboundSpy.mockResolvedValue({ ok: false, error: 'vapi 500' });
+      const { admin } = makeAdmin({
+        candidates: [
+          candidate({
+            id: 'call_exhausted',
+            quote_request_id: 'qr_stuck',
+            retry_count: 0,
+          }),
+        ],
+        applyCallEndError: { message: 'fn does not exist' },
+      });
+
+      await retryFailedCalls(admin);
+
+      expect(captureExceptionSpy).toHaveBeenCalledTimes(1);
+      const [err, ctx] = captureExceptionSpy.mock.calls[0];
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('fn does not exist');
+      expect(ctx).toEqual({
+        tags: {
+          lib: 'cron-retry-failed-calls',
+          reason: 'applyCallEndFailed',
+          callId: 'call_exhausted',
+          quoteRequestId: 'qr_stuck',
+        },
+      });
+      // PII negative: no phone/email leak into tags. Tag values must
+      // be opaque IDs only.
+      for (const v of Object.values(
+        (ctx as { tags: Record<string, string> }).tags
+      )) {
+        expect(v).not.toMatch(/@/);
+        expect(v).not.toMatch(/\+?\d{10,}/);
+      }
+    });
+
+    it('regression-guard: no catch-all reason values — every capture carries a canonical reason', async () => {
+      const ALLOWED = new Set<string>([
+        'candidateQueryFailed',
+        'applyCallEndFailed',
+      ]);
+
+      // Fire both capture sites in sequence. Can't do them in one
+      // retryFailedCalls call because candidateQueryFailed returns
+      // early. Run two separate calls and assert across both.
+      const { admin: admin1 } = makeAdmin({
+        candidatesError: { message: 'scan fail' },
+      });
+      await retryFailedCalls(admin1);
+
+      startOutboundSpy.mockResolvedValue({ ok: false, error: 'vapi bad' });
+      const { admin: admin2 } = makeAdmin({
+        candidates: [
+          candidate({
+            id: 'call_regression',
+            quote_request_id: 'qr_regression',
+            retry_count: 0,
+          }),
+        ],
+        applyCallEndError: { message: 'rpc fail' },
+      });
+      await retryFailedCalls(admin2);
+
+      expect(captureExceptionSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const [, ctx] of captureExceptionSpy.mock.calls) {
+        const tags = (ctx as { tags?: Record<string, string> })?.tags;
+        expect(tags?.lib).toBe('cron-retry-failed-calls');
+        const reason = tags?.reason;
+        expect(reason, `missing reason in tags: ${JSON.stringify(tags)}`).toBeDefined();
+        expect(
+          ALLOWED.has(String(reason)),
+          `reason "${reason}" is not in the allow-list`
+        ).toBe(true);
+        // Explicit catch-all guards.
+        expect(reason).not.toBe('retryFailed');
+        expect(reason).not.toBe('runFailed');
+        expect(reason).not.toBe('unknown');
+        expect(reason).not.toBe('error');
+      }
+    });
   });
 });

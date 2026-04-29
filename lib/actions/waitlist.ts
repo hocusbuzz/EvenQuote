@@ -14,8 +14,9 @@
 import { z } from 'zod';
 import { headers } from 'next/headers';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { assertRateLimitFromHeaders } from '@/lib/security/rate-limit-auth';
 import { createLogger } from '@/lib/logger';
+import { EmailSchema, ZipSchema } from '@/lib/forms/moving-intake';
 
 const log = createLogger('joinWaitlist');
 
@@ -23,13 +24,13 @@ export type WaitlistResult =
   | { ok: true; alreadyOnList: boolean }
   | { ok: false; error: string };
 
+// Email + ZIP pulled from the shared primitives in moving-intake.ts so
+// the chain order / regex / error copy stay consistent with every
+// other email + ZIP field across the product (R45(d)).
 const WaitlistSchema = z.object({
   categorySlug: z.string().min(1),
-  email: z.string().trim().toLowerCase().email('Valid email, please'),
-  zipCode: z
-    .string()
-    .trim()
-    .regex(/^\d{5}(-\d{4})?$/, 'Must be a 5-digit ZIP (or ZIP+4)')
+  email: EmailSchema,
+  zipCode: ZipSchema
     .optional()
     .or(z.literal('').transform(() => undefined)),
 });
@@ -40,14 +41,21 @@ export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
   // signups from repeats — but we still don't want a firehose overwhelming
   // us. Tight limit is appropriate: a real user hits this once, then maybe
   // once more if they mistype.
-  const rl = rateLimit(clientKeyFromHeaders(headers(), 'waitlist'), {
+  //
+  // Using the shared `assertRateLimitFromHeaders` helper instead of the
+  // low-level rateLimit() call keeps the deny path consistent with the
+  // route-handler version (`assertRateLimit`) — same prefix namespacing,
+  // same token-bucket backing store. When we swap to Upstash (user-input
+  // #2), the migration is a one-file change in lib/rate-limit.ts.
+  const deny = assertRateLimitFromHeaders(headers(), {
+    prefix: 'waitlist',
     limit: 5,
     windowMs: 60_000,
   });
-  if (!rl.ok) {
+  if (deny) {
     return {
       ok: false,
-      error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
+      error: `Too many requests. Try again in ${deny.retryAfterSec}s.`,
     };
   }
 

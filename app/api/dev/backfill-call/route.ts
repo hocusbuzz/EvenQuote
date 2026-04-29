@@ -25,7 +25,10 @@
 //   - With quote_request_id: backfills every call on that request that
 //     is still in_progress (or in_progress + queued if ?all=1).
 //
-// Gated NODE_ENV !== 'production'. Optional DEV_TRIGGER_TOKEN via ?token=.
+// Two-layer auth (NODE_ENV + optional DEV_TRIGGER_TOKEN) lives in
+// lib/security/dev-token-auth.ts — edit the helper if you need the
+// auth behavior to change, so the sibling trigger-call route stays
+// in lockstep.
 //
 // To remove: delete this file. There are no other references.
 
@@ -35,6 +38,8 @@ import {
   applyEndOfCall,
   type VapiEndOfCallReport,
 } from '@/lib/calls/apply-end-of-call';
+import { assertDevToken } from '@/lib/security/dev-token-auth';
+import { assertRateLimit } from '@/lib/security/rate-limit-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -74,26 +79,24 @@ type BackfillOne = {
 };
 
 export async function GET(req: Request) {
-  // ── Layer 1: NODE_ENV gate ──
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json(
-      { ok: false, error: 'Dev backfill is disabled in production' },
-      { status: 404 }
-    );
-  }
+  // Centralized two-layer auth: NODE_ENV gate (404 in prod, no probe
+  // signal) + optional DEV_TRIGGER_TOKEN (401 on mismatch, constant-
+  // time compared). See lib/security/dev-token-auth.ts.
+  const deny = assertDevToken(req);
+  if (deny) return deny;
 
-  // ── Layer 2: optional shared-secret gate ──
-  const expectedToken = process.env.DEV_TRIGGER_TOKEN?.trim();
+  // R48(h) — Defense-in-depth rate limit AFTER assertDevToken so the
+  // no-probe-in-prod property holds. 30/60s — backfill is hand-driven
+  // (one call id at a time); a script-spinning loop that's burning
+  // Vapi quota is the precise failure mode this catches.
+  const rateLimitDeny = assertRateLimit(req, {
+    prefix: 'dev-backfill-call',
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (rateLimitDeny) return rateLimitDeny;
+
   const url = new URL(req.url);
-  if (expectedToken) {
-    const provided = url.searchParams.get('token') ?? '';
-    if (provided !== expectedToken) {
-      return NextResponse.json(
-        { ok: false, error: 'Invalid or missing ?token= for DEV_TRIGGER_TOKEN' },
-        { status: 401 }
-      );
-    }
-  }
 
   const apiKey = process.env.VAPI_API_KEY;
   if (!apiKey) {

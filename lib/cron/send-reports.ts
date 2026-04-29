@@ -42,14 +42,44 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { sendEmail } from '@/lib/email/resend';
 import {
   renderQuoteReport,
+  type NoQuoteCause,
   type QuoteForReport,
   type QuoteReportInput,
   type RefundOutcome,
 } from '@/lib/email/templates';
 import { getStripe } from '@/lib/stripe/server';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('cron/send-reports');
+
+// ─────────────────────────────────────────────────────────────────────
+// Canonical Sentry tag shape for this module:
+//
+//   { lib: 'cron-send-reports', reason: CronSendReportsReason, ... }
+//
+// Prior to R27 only the ROUTE handler captured (`{route:'cron/send-
+// reports', reason:'runFailed'}`) and only on thrown exceptions from
+// sendPendingReports itself. The per-request failures below (email
+// send failed, final stamp failed, Stripe refund failed, payments
+// lookup failed, refund book-keeping failed) do NOT throw — they
+// return `{status:'failed', reason:...}` in the per-request detail,
+// which never reaches the route's try/catch. That means production
+// was silent on every one of these surfaces: a Resend outage dropping
+// 50 reports would log but never page.
+//
+// The `reason` values are allow-listed and enforced by a regression-
+// guard test in lib/cron/send-reports.test.ts. Do NOT add catch-alls
+// like `sendReportsFailed` or `unknown` — each capture site must
+// describe WHICH failure path it is.
+// ─────────────────────────────────────────────────────────────────────
+export type CronSendReportsReason =
+  | 'sendFailedPostClaim'
+  | 'outboxClaimFailed'
+  | 'finalStampFailed'
+  | 'refundLookupFailed'
+  | 'refundCreateFailed'
+  | 'refundStatusUpdateFailed';
 
 // Keep a single invocation bounded — report rendering is cheap but
 // we still want to fit inside a 60s serverless window with headroom.
@@ -215,6 +245,20 @@ async function processOne(
   const coverageSummary = buildCoverageSummary(request);
   const dashboardUrl = buildDashboardUrl(request.id);
 
+  // R47.6: distinguish "no businesses ever called" (coverage gap)
+  // from "called pros but no usable quotes" (no_response). The
+  // webhook's advanced:false path parks the row with
+  // total_businesses_to_call=0; everything else with zero quotes
+  // had at least one call placed. This drives the email copy so
+  // we don't claim "we called the local pros" when no calls
+  // actually happened.
+  const noQuoteCause: NoQuoteCause | undefined =
+    quotes.length === 0
+      ? (request.total_businesses_to_call ?? 0) === 0
+        ? 'coverage_gap'
+        : 'no_response'
+      : undefined;
+
   const payload: QuoteReportInput = {
     recipientName: recipient.name,
     categoryName,
@@ -223,6 +267,7 @@ async function processOne(
     coverageSummary,
     dashboardUrl,
     refundOutcome,
+    noQuoteCause,
     quotes: quotes.map<QuoteForReport>((q) => ({
       businessName: q.business?.name ?? 'Local pro',
       priceMin: q.price_min,
@@ -268,7 +313,51 @@ async function processOne(
     };
   }
 
-  // 6. Send.
+  // 6. Claim the row BEFORE sending — outbox-marker pattern.
+  //
+  // R47.4: the old order was send-then-stamp. If the email succeeded
+  // but the post-send stamp failed (DB blip, deploy mid-write,
+  // anything), the next cron tick saw `report_sent_at IS NULL` and
+  // re-sent the same report. Customers got duplicate emails on a
+  // paid product — exactly the kind of "looks broken" signal we
+  // can't afford.
+  //
+  // New order: stamp `report_sent_at` to "now" with a CAS guard
+  // (`AND report_sent_at IS NULL`) BEFORE the send. If 0 rows
+  // updated, someone else claimed it — skip. Then send. If send
+  // fails, the row is left in a "claimed but undelivered" state
+  // (report_sent_at non-null, status still 'processing'). The row
+  // shows up in admin queries on `status='processing' AND
+  // report_sent_at IS NOT NULL` and ops can decide whether to
+  // un-stamp + retry. The trade-off chosen: at-most-once delivery
+  // (favoring trust) over at-least-once (favoring throughput).
+  const claimedAt = new Date().toISOString();
+  const { data: claimed, error: claimErr } = await admin
+    .from('quote_requests')
+    .update({ report_sent_at: claimedAt })
+    .eq('id', request.id)
+    .is('report_sent_at', null)
+    .select('id')
+    .maybeSingle();
+  if (claimErr) {
+    log.error('outbox claim failed', { requestId: request.id, err: claimErr });
+    captureException(new Error(`outbox claim: ${claimErr.message}`), {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'outboxClaimFailed',
+        requestId: request.id,
+      },
+    });
+    return { status: 'failed', reason: `outbox claim: ${claimErr.message}` };
+  }
+  if (!claimed) {
+    // Lost the race to a parallel cron tick. Skip without sending.
+    return { status: 'skipped', reason: 'already claimed by another run' };
+  }
+
+  // 7. Send. The row is now claimed — even if this throws or the
+  // process dies, the row will not be re-claimed by the next tick
+  // (its report_sent_at is non-null).
   const send = await sendEmail({
     to: recipient.email,
     subject: rendered.subject,
@@ -278,32 +367,54 @@ async function processOne(
   });
 
   if (!send.ok) {
-    // Leave status='processing' so the next run retries. Log loud so
-    // sustained failure gets noticed.
-    log.error('send failed', { requestId: request.id, err: send.error });
+    // The row is claimed but undelivered. Surface it loudly so ops
+    // can reconcile (un-stamp report_sent_at to retry, or accept
+    // the loss + refund).
+    log.error('send failed AFTER outbox claim — row is in undelivered state', {
+      requestId: request.id,
+      err: send.error,
+    });
+    captureException(new Error(send.error), {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'sendFailedPostClaim',
+        requestId: request.id,
+      },
+    });
     return { status: 'failed', reason: send.error };
   }
 
-  // 7. Stamp completion. If this update errors AFTER a successful
-  // send, next run's `is('report_sent_at', null)` filter would re-send;
-  // we log loudly so ops can manually reconcile.
+  // 8. Final stamp. The send went out; advance status and record the
+  // provider message id. A failure here means status stays
+  // 'processing' but report_sent_at is set — same undelivered-state
+  // shape as above (no duplicate-send risk because the cron's filter
+  // checks report_sent_at IS NULL). Log loudly + capture; ops can
+  // manually flip status to 'completed'.
   const { error: finalErr } = await admin
     .from('quote_requests')
-    .update({
-      report_sent_at: new Date().toISOString(),
-      status: 'completed',
-    })
+    .update({ status: 'completed' })
     .eq('id', request.id);
   if (finalErr) {
-    log.error('email sent but final stamp failed — will re-send next run', {
-      requestId: request.id,
-      emailId: send.id,
-      err: finalErr.message,
+    log.error(
+      'email sent + outbox claimed but status flip failed — manual reconcile needed',
+      {
+        requestId: request.id,
+        emailId: send.id,
+        err: finalErr,
+      }
+    );
+    captureException(new Error(finalErr.message), {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'finalStampFailed',
+        requestId: request.id,
+        emailId: send.id,
+      },
     });
-    return {
-      status: 'failed',
-      reason: `final stamp: ${finalErr.message}`,
-    };
+    // Email DID go out — return sent so the caller's metrics reflect
+    // reality. The status mismatch is an admin-visible follow-up,
+    // not a customer-facing failure.
+    return { status: 'sent', email_id: send.id };
   }
 
   return { status: 'sent', email_id: send.id };
@@ -398,7 +509,17 @@ async function refundForZeroQuotes(
   if (payErr) {
     log.error('refund: payments lookup failed', {
       requestId,
-      err: payErr.message,
+      err: payErr,
+    });
+    // Refund path is blocked on a DB error — customer is told "reply
+    // to this email" instead of getting the promised refund. Signal
+    // is genuine (infra / permissions) not invariant-violation.
+    captureException(new Error(payErr.message), {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'refundLookupFailed',
+        requestId,
+      },
     });
     return 'pending_support';
   }
@@ -452,6 +573,19 @@ async function refundForZeroQuotes(
       paymentId: pay.id,
       err: msg,
     });
+    // Stripe side unreachable/errored → customer was told "zero quotes,
+    // refund on the way" (template) but the refund did NOT happen. The
+    // template falls back to "reply to this email" when we return
+    // 'pending_support' here — but it's worth an active page so ops
+    // can do the refund manually before the user replies.
+    captureException(err, {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'refundCreateFailed',
+        requestId,
+        paymentId: pay.id,
+      },
+    });
     return 'pending_support';
   }
 
@@ -467,7 +601,19 @@ async function refundForZeroQuotes(
     log.error('refund: payments status update failed after successful Stripe refund', {
       paymentId: pay.id,
       requestId,
-      err: updErr.message,
+      err: updErr,
+    });
+    // Book-keeping drift: Stripe has issued the refund, our DB still
+    // says 'completed'. A next run's idempotency key would no-op on
+    // Stripe's side (safe), but the payments table doesn't reflect
+    // the refund. Medium signal — data drift, not customer-facing.
+    captureException(new Error(updErr.message), {
+      tags: {
+        lib: 'cron-send-reports',
+        reason: 'refundStatusUpdateFailed',
+        requestId,
+        paymentId: pay.id,
+      },
     });
   }
 

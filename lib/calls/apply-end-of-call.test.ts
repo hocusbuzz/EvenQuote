@@ -24,6 +24,19 @@ vi.mock('@/lib/calls/extract-quote', () => ({
   extractQuoteFromCall: (...args: unknown[]) => extractSpy(...args),
 }));
 
+// Lib-boundary captureException audit: mirror the engine.test.ts
+// pattern. Mock the sentry module so we can assert the canonical
+// `{ lib: 'apply-end-of-call', reason, callId, ... }` tag shape at
+// both capture sites — `quotesInsertFailed` (non-23505 insert errs)
+// and `recomputeFailed` (best-effort success-rate refresh failure).
+// Mocked at module level to avoid the real stub emitting log noise
+// during the happy-path test runs that assert NO capture.
+const captureExceptionMock = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (err: unknown, ctx?: unknown) =>
+    captureExceptionMock(err, ctx),
+}));
+
 // Import after mocks are registered.
 import { applyEndOfCall, classifyOutcome, type VapiEndOfCallReport } from './apply-end-of-call';
 
@@ -34,6 +47,13 @@ type CallRow = {
   quote_request_id: string;
   business_id: string;
   status: string;
+  /**
+   * Sentinel for "counters have been applied". Gate for the short-
+   * circuit. NULL means counters haven't been bumped yet — caller will
+   * proceed with the status/extraction/RPC path even if status is
+   * already terminal (retry-repair of a crashed prior apply).
+   */
+  counters_applied_at?: string | null;
   quote_requests?: unknown;
 };
 
@@ -132,6 +152,7 @@ function baseCallRow(overrides: Partial<CallRow> = {}): CallRow {
     quote_request_id: 'qr_1',
     business_id: 'biz_1',
     status: 'in_progress',
+    counters_applied_at: null,
     quote_requests: {
       category_id: 'cat_1',
       service_categories: {
@@ -164,6 +185,7 @@ function baseReport(overrides: Partial<VapiEndOfCallReport> = {}): VapiEndOfCall
 describe('applyEndOfCall', () => {
   beforeEach(() => {
     extractSpy.mockReset();
+    captureExceptionMock.mockReset();
     // Default: extraction returns a valid quote.
     extractSpy.mockResolvedValue({
       ok: true,
@@ -195,29 +217,72 @@ describe('applyEndOfCall', () => {
     expect(state.rpcCalls).toHaveLength(0);
   });
 
-  it('short-circuits on terminal status (idempotency)', async () => {
+  it('short-circuits when counters_applied_at is stamped (fully-applied replay)', async () => {
+    // Classic replay: an earlier successful run stamped counters_applied_at.
+    // No matter what the status says, we skip — counters were already bumped.
     const { admin, state } = makeAdmin({
-      callRow: baseCallRow({ status: 'completed' }),
+      callRow: baseCallRow({
+        status: 'completed',
+        counters_applied_at: '2026-04-22T12:00:00Z',
+      }),
     });
     const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
     expect(result.applied).toBe(false);
     expect(result.status).toBe('completed');
-    expect(result.note).toContain('already in terminal status');
+    expect(result.note).toContain('counters already applied');
     // No update, no extraction, no rpc.
     expect(state.callsUpdatePayload).toBeUndefined();
     expect(extractSpy).not.toHaveBeenCalled();
     expect(state.rpcCalls).toHaveLength(0);
   });
 
-  it('short-circuits on each terminal status variant', async () => {
-    for (const term of ['completed', 'failed', 'no_answer', 'refused']) {
+  it('short-circuits regardless of status when counters_applied_at is set', async () => {
+    // The short-circuit gate is the sentinel, not the status. Any
+    // status paired with a stamped sentinel is a no-op.
+    for (const term of ['completed', 'failed', 'no_answer', 'refused', 'in_progress']) {
       const { admin } = makeAdmin({
-        callRow: baseCallRow({ status: term }),
+        callRow: baseCallRow({
+          status: term,
+          counters_applied_at: '2026-04-22T12:00:00Z',
+        }),
       });
       const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
       expect(result.applied).toBe(false);
       expect(result.status).toBe(term);
     }
+  });
+
+  it('retry-repair: terminal status + counters_applied_at=null RE-RUNS end-of-call', async () => {
+    // This is the regression test for the webhook-retry bug (GPT Codex
+    // P1-1). Prior behavior short-circuited on terminal status alone,
+    // so if an earlier run wrote status='completed' and then the RPC
+    // threw (deadlock, connection reset), counters were never bumped
+    // and the next Vapi retry silently dropped the work.
+    //
+    // Correct behavior: see counters_applied_at=null → re-run the full
+    // sequence. Status UPDATE is idempotent, quotes insert is idempotent
+    // (UNIQUE(call_id) swallowed on 23505), the RPC's internal claim
+    // guarantees counters bump at most once server-side.
+    const { admin, state } = makeAdmin({
+      callRow: baseCallRow({
+        status: 'completed',
+        counters_applied_at: null,
+      }),
+    });
+    const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+
+    expect(result.applied).toBe(true);
+    // Status UPDATE fired (idempotent re-write of terminal status).
+    expect(state.callsUpdatePayload).toBeDefined();
+    // Extraction ran (idempotent — quotes UNIQUE(call_id) catches dupes).
+    expect(extractSpy).toHaveBeenCalledTimes(1);
+    // Counter RPC fired with p_call_id so the server-side claim can
+    // atomically no-op if it was somehow already applied.
+    expect(state.rpcCalls[0].fn).toBe('apply_call_end');
+    expect(state.rpcCalls[0].args).toMatchObject({
+      p_request_id: 'qr_1',
+      p_call_id: 'call_internal_1',
+    });
   });
 
   it('on success: updates calls row, inserts quote, fires both RPCs', async () => {
@@ -248,6 +313,7 @@ describe('applyEndOfCall', () => {
     ]);
     expect(state.rpcCalls[0].args).toMatchObject({
       p_request_id: 'qr_1',
+      p_call_id: 'call_internal_1',
       p_quote_inserted: true,
     });
   });
@@ -362,6 +428,148 @@ describe('applyEndOfCall', () => {
     // so this also confirms that looking up via that arg works end-to-end.
     const result = await applyEndOfCall(admin, VAPI_CALL_ID, report);
     expect(result.applied).toBe(true);
+  });
+
+  // ── lib-boundary captureException tests ──────────────────────────
+  // Two capture sites in applyEndOfCall:
+  //   1. non-23505 quotes insert failure  (lib, reason: 'quotesInsertFailed')
+  //   2. recompute_business_success_rate failure (lib, reason: 'recomputeFailed')
+  // Both must carry canonical tag shapes and NO PII. We also assert
+  // that expected non-failure paths (UNIQUE-violation swallow, happy
+  // path) do NOT fire a capture — dashboards would drown in noise
+  // otherwise, since unique-violation is the default Vapi-retry state.
+
+  it('captures quotesInsertFailed with canonical tags on non-23505 insert error', async () => {
+    const { admin } = makeAdmin({
+      callRow: baseCallRow(),
+      quotesInsertError: { code: '42703', message: 'column "foo" does not exist' },
+    });
+    const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    // Same behavior as before — applied still flips true; generic insert
+    // errors don't bubble. But we now emit a capture event.
+    expect(result.applied).toBe(true);
+    expect(result.quoteInserted).toBe(false);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/column "foo" does not exist/);
+    expect(ctx).toEqual({
+      tags: {
+        lib: 'apply-end-of-call',
+        reason: 'quotesInsertFailed',
+        callId: 'call_internal_1',
+        quoteRequestId: 'qr_1',
+      },
+    });
+    // Strict key-set — new keys require updating dashboards / alerts.
+    const tagKeys = Object.keys(
+      (ctx as { tags: Record<string, string> }).tags
+    );
+    expect(tagKeys.sort()).toEqual(
+      ['callId', 'lib', 'quoteRequestId', 'reason'].sort()
+    );
+    // PII negative-assertion. contactName/contactPhone/contactEmail
+    // must NEVER show up in tag values.
+    const tagValues = Object.values(
+      (ctx as { tags: Record<string, string> }).tags
+    );
+    for (const v of tagValues) {
+      expect(v).not.toMatch(/@/); // email guard
+      expect(v).not.toMatch(/\+?\d{10,}/); // phone guard
+    }
+  });
+
+  it('does NOT capture on 23505 UNIQUE-violation (expected retry path)', async () => {
+    // This is the common case — Vapi redelivers an end-of-call report
+    // and the calls.counters_applied_at sentinel hasn't been stamped
+    // yet. We re-attempt the quote insert and the UNIQUE constraint
+    // rejects the dupe. Capturing here would flood Sentry with noise on
+    // every retry storm — make sure we explicitly skip.
+    const { admin } = makeAdmin({
+      callRow: baseCallRow(),
+      quotesInsertError: { code: '23505', message: 'duplicate key value' },
+    });
+    const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    expect(result.applied).toBe(true);
+    expect(result.quoteInserted).toBe(false);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('captures recomputeFailed with canonical tags and still returns applied=true', async () => {
+    // recompute is best-effort — it must NOT bubble an error, but it
+    // MUST emit a capture so ops can see a degrading success-rate
+    // pipeline. Regression test: if someone removes the capture because
+    // "it's best-effort anyway", we want this to fail loudly.
+    const { admin } = makeAdmin({
+      callRow: baseCallRow(),
+      recomputeError: { message: 'connection reset by peer' },
+    });
+    const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    expect(result.applied).toBe(true);
+    expect(result.quoteInserted).toBe(true);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/connection reset by peer/);
+    expect(ctx).toEqual({
+      tags: {
+        lib: 'apply-end-of-call',
+        reason: 'recomputeFailed',
+        callId: 'call_internal_1',
+        businessId: 'biz_1',
+      },
+    });
+    // Strict key-set.
+    const tagKeys = Object.keys(
+      (ctx as { tags: Record<string, string> }).tags
+    );
+    expect(tagKeys.sort()).toEqual(
+      ['businessId', 'callId', 'lib', 'reason'].sort()
+    );
+  });
+
+  it('captures BOTH sites when quotes insert AND recompute both fail', async () => {
+    // Belt-and-braces: if we somehow regress to a state where both
+    // downstream steps fail, each site should emit its own tagged
+    // capture — Sentry dedupes on fingerprint but the tag facets are
+    // what make dashboards useful.
+    const { admin } = makeAdmin({
+      callRow: baseCallRow(),
+      quotesInsertError: { code: '42501', message: 'permission denied for table quotes' },
+      recomputeError: { message: 'deadlock detected' },
+    });
+    await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    expect(captureExceptionMock).toHaveBeenCalledTimes(2);
+    const reasons = captureExceptionMock.mock.calls.map(
+      (c) => (c[1] as { tags: { reason: string } }).tags.reason
+    );
+    expect(reasons.sort()).toEqual(['quotesInsertFailed', 'recomputeFailed'].sort());
+  });
+
+  it('does NOT capture on the happy path', async () => {
+    // Sanity: a clean end-of-call with no errors should never emit
+    // captureException. A regression here (capturing on success) would
+    // wash out the entire dashboard with noise.
+    const { admin } = makeAdmin({ callRow: baseCallRow() });
+    const result = await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    expect(result.applied).toBe(true);
+    expect(result.quoteInserted).toBe(true);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT capture on short-circuit (counters_applied_at stamped)', async () => {
+    // Replay-style short-circuit must be completely silent — this is
+    // the default Vapi retry path and fires constantly in production.
+    const { admin } = makeAdmin({
+      callRow: baseCallRow({
+        status: 'completed',
+        counters_applied_at: '2026-04-22T12:00:00Z',
+      }),
+    });
+    await applyEndOfCall(admin, VAPI_CALL_ID, baseReport());
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 });
 

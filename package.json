@@ -15,7 +15,15 @@
     "ingest:businesses": "tsx scripts/ingest-businesses.ts",
     "test:e2e": "tsx scripts/test-e2e.ts",
     "test:e2e:zero": "tsx scripts/test-e2e.ts --zero-quotes",
-    "test:vapi": "bash scripts/test-vapi-webhook.sh"
+    "test:vapi": "bash scripts/test-vapi-webhook.sh",
+    "smoke:webhook-preview": "tsx scripts/smoke-webhook-preview.ts",
+    "preflight": "tsx scripts/launch-readiness.ts",
+    "preflight:strict": "tsx scripts/launch-readiness.ts --strict",
+    "smoke:seed": "tsx scripts/smoke-seed-on-demand.ts",
+    "wipe:quote-data": "tsx scripts/wipe-quote-data.ts",
+    "patch:vapi-prompt": "tsx scripts/patch-vapi-speaking-style.ts",
+    "patch:vapi-tunnel": "tsx scripts/patch-vapi-tunnel-url.ts",
+    "apply:migration": "tsx scripts/apply-migration.ts"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.1",
@@ -45,11 +53,12 @@
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.4.20",
     "dotenv": "^16.4.5",
+    "esbuild": "^0.28.0",
     "eslint": "^8.57.1",
     "eslint-config-next": "14.2.15",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
-    "tsx": "^4.19.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.6.2",
     "vitest": "^4.1.5"
   }

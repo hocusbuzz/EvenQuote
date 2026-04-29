@@ -12,7 +12,7 @@ import { Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const includes = [
-  'Up to 25 calls to local moving companies',
+  'Up to 10 calls to local pros',
   'Structured price range from each business',
   'Availability check for your move date',
   'What\'s included: movers, truck size, insurance',
@@ -37,7 +37,11 @@ export function Pricing() {
           </h2>
         </div>
 
-        <div className="mx-auto grid max-w-5xl overflow-hidden rounded-xl border-2 border-cream md:grid-cols-[1fr_1.4fr]">
+        {/* The whole pricing card gets a slow tilt-wobble (±0.6° over
+            8s) so it feels alive without grabbing attention. Paired
+            with the hero sticker's existing wobble, the site has a
+            consistent "nothing is static" undercurrent. */}
+        <div className="mx-auto grid max-w-5xl overflow-hidden rounded-xl border-2 border-cream motion-safe:animate-tilt-wobble md:grid-cols-[1fr_1.4fr]">
           {/* Left panel — price */}
           <div className="flex flex-col justify-between border-b-2 border-cream bg-lime p-8 text-ink md:border-b-0 md:border-r-2 md:p-12">
             <div>
@@ -46,13 +50,18 @@ export function Pricing() {
                 $9
                 <span className="align-top text-5xl">⁹⁹</span>
               </p>
+              <p className="mt-2 font-mono text-xs uppercase tracking-[0.2em] text-ink/60">
+                + tax if applicable
+              </p>
               <p className="mt-4 max-w-xs font-display text-xl leading-snug">
                 One payment per request. Pay only when you're ready to collect quotes.
               </p>
             </div>
 
-            <Button asChild variant="default" size="xl" className="mt-10 w-full bg-ink text-cream hover:bg-ink/90">
-              <Link href="/get-quotes">Start a request</Link>
+            <Button asChild variant="default" size="xl" className="mt-10 w-full bg-ink text-cream hover:bg-ink/90 group">
+              <Link href="/get-quotes">
+                Start a request
+              </Link>
             </Button>
           </div>
 
@@ -60,10 +69,16 @@ export function Pricing() {
           <div className="p-8 md:p-12">
             <p className="label-eyebrow mb-5 !text-cream/60">What's included</p>
             <ul className="space-y-3">
-              {includes.map((item) => (
+              {includes.map((item, i) => (
                 <li key={item} className="flex items-start gap-3 text-base leading-relaxed">
+                  {/* Check marks pop in with a quick stagger so the
+                      list "lights up" as it enters view. Small
+                      animation-delay walks down the list at ~80ms
+                      increments — fast enough that the whole list
+                      feels snappy, not sluggish. */}
                   <Check
-                    className="mt-1 size-4 shrink-0 text-lime"
+                    className="mt-1 size-4 shrink-0 text-lime motion-safe:animate-check-pop"
+                    style={{ animationDelay: `${i * 80}ms` }}
                     strokeWidth={3}
                     aria-hidden
                   />
@@ -76,13 +91,14 @@ export function Pricing() {
 
             <p className="label-eyebrow mb-5 !text-cream/60">What you'll never get</p>
             <ul className="space-y-3">
-              {notIncludes.map((item) => (
+              {notIncludes.map((item, i) => (
                 <li
                   key={item}
                   className="flex items-start gap-3 text-base leading-relaxed text-cream/70"
                 >
                   <X
-                    className="mt-1 size-4 shrink-0 text-cream/40"
+                    className="mt-1 size-4 shrink-0 text-cream/40 motion-safe:animate-check-pop"
+                    style={{ animationDelay: `${(includes.length + i) * 80}ms` }}
                     strokeWidth={3}
                     aria-hidden
                   />

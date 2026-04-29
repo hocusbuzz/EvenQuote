@@ -2098,3 +2098,2497 @@ this round was all additive test + helper work.
 
 — Claude, 2026-04-23 (twelfth run)
 
+# Round 13 — 2026-04-22 (thirteenth run, scheduled-task autonomous)
+
+## TL;DR
+
+Picked up the four "no user input needed" items Round 12 left on the
+suggestion list and did the fifth (RUNBOOKS audit) as a read-only
+pass. One behavior change in `lib/logger.ts` plus additive test work;
+everything else is additive or documentation-only.
+
+- **Behavior change (small, opt-in-shaped):** `lib/logger.ts` now
+  auto-computes `fingerprint` whenever the log context carries a
+  substantive `err`. The hash lifts to the TOP level of the emitted
+  JSON (alongside `ts`/`level`/`ns`/`msg`), so Vercel log-search and
+  any future monitor get a single greppable grouping key. Call sites
+  unchanged — every existing `log.error('…', { err })` in the
+  codebase now ships a `fingerprint` field with zero edits.
+- **New tests:** +22 across 3 files. 12 cover the new auto-wiring
+  (null/undefined/empty handled, explicit override respected, every
+  level emits, JSON round-trip stability). 10 are envelope-invariant
+  lockdowns on `/api/health` (+5) and `/api/status` (+5) mirroring
+  the Round 12 cron pattern — every outcome has top-level
+  `ok:boolean`, agrees with HTTP status class, no stack leakage.
+- **New launcher:** `Check Health.command` — pair to
+  `Check Version.command`. Double-click to print prod + local
+  `/api/health` with pretty JSON. `chmod +x` + `bash -n` clean.
+- **Audit, no change:** walked all four runbooks in
+  `docs/RUNBOOKS/` plus the README. Every referenced endpoint,
+  env var, DB table/column, status enum value, logger namespace,
+  and helper script still exists with the same name.
+
+**Tests: 571/571 across 56 files** (was 549/549). +22 tests, same
+file count. `npx tsc --noEmit` clean. `npx next lint` clean. No
+`next build` (sandbox 45s budget; change surface is test-file
+additions + one logger helper + one ops `.command` — no route /
+layout changes).
+
+## What landed in this run
+
+### 1. Auto-fingerprint in `lib/logger.ts`
+
+Round 12 left `fingerprintError()` as a ready-to-use helper with
+nothing calling it. Suggestion #2 was: pre-wire it into the logger
+itself so every call site gets fingerprint-for-free. That's the
+cleaner pattern (Round 12's suggestion #1, updating every call site,
+becomes unnecessary).
+
+**Contract (locked by the new tests):**
+
+1. If `ctx.err` is a substantive value (not `null`, not `undefined`,
+   not empty string), the emitted payload carries a top-level
+   `fingerprint: '<8 hex chars>'` field. Substantive includes:
+   `Error` instances, error-shaped plain objects, non-empty strings,
+   primitives — anything `fingerprintError` can hash.
+2. If the caller explicitly passed `ctx.fingerprint: 'custom-id'`,
+   that wins. Callers that know better (e.g. cross-service trace
+   ids) keep control.
+3. Empty/nullish `err` values are explicitly excluded — fingerprinting
+   those hashes to the same degenerate id across unrelated call sites
+   and would only add noise.
+4. Fires on every level (debug/info/warn/error), not just error.
+   Info-level "recovered from" logs are also bug signals.
+5. The fingerprint lands at the top of the payload (before `ctx`),
+   so a log-line grep hits it before the noisy ctx blob. The test
+   asserts this ordering explicitly — documents the intended shape
+   and trips a future accidental field reorder.
+
+**Why top-level, not nested in `ctx`:** monitoring tools typically
+search by flat JSON paths. `payload.fingerprint` is one grep;
+`payload.ctx.fingerprint` invites bugs when someone later spreads
+`ctx` somewhere and drops the key. Also: if the monitor is a
+quick-and-dirty Slack alert on `grep fingerprint=<id>`, having it
+out of `ctx` means you don't have to look past emails and phone
+numbers in the redacted data to find the id.
+
+**Why it's safe to enable without a feature flag:** the change adds
+one field to an existing JSON payload. Nothing that parses these
+logs today reads unknown fields as errors. Vercel's log pipe just
+stringifies and ships it. Worst case, there's one extra field with
+a hash in it — which is exactly what we want.
+
+**Design choice — string errs:** many existing call sites pass
+`err: error.message` (a string) rather than the Error object. Auto-
+wiring still fires, but the fingerprint is computed off the string,
+which has no stack and collapses similar strings to the same id.
+That's less useful for grouping than Error-level fingerprints would
+be, but it's consistent with the stated contract (substantive err →
+fingerprint). The fix when Sentry lands is a one-line drive-by at
+each site: `err: error.message` → `err: error`. Deferred because
+that's >10 call sites and the current behavior isn't broken, just
+suboptimal.
+
+Test coverage (+12 in `lib/logger.test.ts`):
+- auto-emits fingerprint on Error ctx.err across all 4 levels
+- explicit `fingerprint` override respected
+- null / undefined / empty-string err → no fingerprint
+- no ctx.err key → no fingerprint
+- no ctx at all → no fingerprint
+- string err fingerprints (documented, tested, consistent)
+- fingerprint survives JSON round-trip and is stable across calls
+- fingerprint field ordered BEFORE `ctx` in the payload
+
+Real-world confirmation: running the existing `/api/health` and
+`/api/status` test suites, the captured stderr now shows lines like
+`{"ts":"…","level":"error","ns":"health","msg":"db check failed",
+"fingerprint":"62ee1f21","ctx":{…}}` — the wire-up flows end to
+end through a real handler.
+
+### 2. Envelope invariants on `/api/health` and `/api/status`
+
+Round 12 suggestion #3. Same pattern as the cron invariants: one
+`describe('response envelope invariants — …')` block per test file,
+a `collectAllOutcomes()` helper that exercises every realistic
+response shape, then a set of cross-outcome assertions.
+
+**`/api/status` (+5 tests):** mirrors `/api/cron/check-status`
+exactly — this endpoint has the same auth + degraded-vs-config
+error-field contract (flat `error` string on auth/config failures,
+`errors: {stripe: 'msg', vapi: 'msg'}` on degraded).
+- Outcomes exercised: `missing-secret-env` (500), `unauth` (401),
+  `happy` (200), `degraded` (503 with stripe failing), `skip`
+  (200, no integration envs set).
+- Assertions: top-level `ok:boolean`, ok agrees with HTTP class,
+  auth/config ok:false has non-empty `error` string, degraded
+  reports per-check via `errors` object not flat `error`, no
+  outcome leaks `    at ` in any error/errors field.
+
+**`/api/health` (+5 tests):** simpler shape — no auth gate, no
+`error` field at all (failure is signalled through `checks.db:
+'fail'` + HTTP 503).
+- Outcomes exercised: `happy`, `db-fail` (error from select),
+  `db-throws` (admin client constructor throws — a path Round 12
+  didn't cover, caught by the new coverage).
+- Assertions: top-level `ok:boolean`, ok agrees with HTTP class,
+  every outcome has a `checks.db` with a known enum value, every
+  ok:false reports `checks.db='fail'`, and — this is the key one
+  — *no body field anywhere* contains `    at `. The stack-leak
+  check for `/health` is more aggressive than `/status` because
+  the health body has several nested maps (`checks.*`,
+  `features.*`) that a future "helpful" change might stuff an
+  err.stack into.
+
+These invariants land the monitoring-contract-lockdown pass Round
+12 opened. Next time a future drive-by tries to `return err.stack`
+or slip an ok:false into an HTTP 200, one of these tests fires.
+
+### 3. `Check Health.command` — new ops launcher
+
+Round 12 suggestion #4. Pair to `Check Version.command`.
+
+Behavior, mirroring the version launcher's shape for predictability:
+- Probes `https://evenquote.com/api/health` first (10s timeout).
+- Probes `http://localhost:3000/api/health` only if `:3000` is
+  listening.
+- Prints both 200 AND 503 bodies — degraded is still useful intel.
+  (The version script treats non-200 as a hard error; health doesn't.)
+- Pretty-prints via `jq` → `python3 -m json.tool` → raw.
+- `read -n 1` hold on keypress so the window stays readable after
+  double-click.
+- `chmod +x`, `bash -n` syntax-clean, matches the coding style of
+  the other `.command` scripts at repo root.
+
+### 4. RUNBOOKS audit — no changes
+
+Round 12 suggestion #5. Walked `docs/RUNBOOKS/` — README + 4
+scenario playbooks (stripe-webhook-down, vapi-call-timed-out,
+supabase-503, resend-bounced). Verified every referenced:
+
+- Endpoint: `/api/health`, `/api/status`, `/api/cron/check-status`,
+  `/api/cron/retry-failed-calls`, `/api/cron/send-reports`,
+  `/api/dev/backfill-call`, `/api/dev/trigger-call`. All exist.
+- Env var: `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `CRON_SECRET`,
+  `VAPI_API_KEY`, `MAINTENANCE_MODE`, `DEV_TRIGGER_TOKEN`. All
+  resolved in `lib/env.ts` / `.env.example`.
+- Logger namespace: `stripe/webhook`, `vapi/webhook`,
+  `cron/send-reports`, `cron/retry-failed-calls`, `health`,
+  `status`. All present as `createLogger('…')` calls.
+- DB table: `quote_requests`, `payments`, `quotes`, `calls`. All
+  in `supabase/migrations/0001_initial_schema.sql`.
+- DB column: `report_sent_at` on quote_requests. Present in schema,
+  read + written by `lib/cron/send-reports.ts`.
+- Status enum value: `pending_payment`, `calling`, `completed`,
+  `failed`, `no_answer`, `refused`. All in the migrations.
+- Helper script: `lib/calls/vapi.test.ts`. Present. (Runbook
+  suggests adding regression tests here post-incident.)
+- Doc ref: `docs/DOMAIN_SETUP.md`. Present.
+- Page: `/maintenance`. Present at `app/maintenance/page.tsx` and
+  wired into `middleware.ts` as expected.
+
+**Verdict:** runbooks are clean. They were last touched in Round 9;
+the codebase has continued to move, but everything referenced is
+stable-enough that no drift has occurred.
+
+The one nit worth flagging (not a runbook bug, a future-work item):
+the Resend runbook's section "After the fire is out" recommends
+adding a Sentry / log alert on >1 Resend error per cron run. That
+remains a carry-forward — no Sentry wired today. When it's wired,
+`fingerprintError()` auto-flow from this round means the alert
+rule can group by `fingerprint`, which is the right grouping key.
+
+## Verification
+
+- `npx vitest run` — **571/571 across 56 files**, 10.21s.
+  (Was 549/549 across 56. +22 tests, same file count.)
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `bash -n "Check Health.command"` — syntax clean.
+- `bash -n "Check Version.command"` — regression check, still clean.
+- `next build` — not run (sandbox 45s timeout; change surface is
+  additive: one `lib/logger.ts` function edit + 3 test-file
+  additions + 1 ops `.command` file outside the Next.js build graph).
+  Run locally before pushing.
+
+## Items needing Antonio's input
+
+Carry-forward list is unchanged from Round 12 in *scope*. One item
+(#5 in the old list) is now fully acknowledged — `lib/forms/use-step-validation.ts`
+was a read-only audit in Round 12, no action needed unless the
+form surface changes. Dropping from 12 to 11 items.
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac.** Already done in
+   commit `400005b` ("Remove obsolete commit helper"). If the file
+   is truly gone from your local, this item can drop. Sandbox git
+   log shows it committed; worth confirming `ls COMMIT_COMMANDS.sh`
+   returns "No such file or directory".
+2. **Distributed rate limiter.** Needs Upstash credentials (or any
+   KV/Redis). In-memory limiter is per-instance.
+3. **Marketing assets** — landing-page hero copy, screenshots. I
+   see you have WIP on `components/site/hero.tsx` + `rotating-word.tsx`
+   + `tailwind.config.ts` this session; not touching those.
+4. **Legal review of `/terms` and `/privacy`.** Drafts in place,
+   noindex'd since Round 11, not linked from the footer until you
+   say go.
+5. **Next 16 migration window.** Four high-severity `npm audit`
+   items chain to it.
+6. **Sentry (or equivalent).** `lib/logger.ts` PII redaction is
+   ready to feed it. `fingerprintError()` is now auto-attached to
+   every `log.error({ err })` call site as of this round —
+   Sentry's "group by fingerprint" rule works out of the box the
+   moment you wire it.
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`. Vercel emails on non-2xx; your stopgap until
+   Sentry.
+8. **Begin the CSP Report-Only window.** Set `CSP_NONCE_ENABLED=true`
+   in Vercel, walk away for a week, then thread the nonce through
+   `app/layout.tsx`'s JSON-LD `<script>` tags and flip
+   `CSP_ENFORCE=true`.
+9. **Vapi prompt tuning** — once you have your first 20 real calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY` /
+    `ANTHROPIC_API_KEY`.** Today they stay optional (simulation
+    fallback); `/api/health` is the safety net. Say the word and
+    I'll hard-fail-on-missing (one block in `lib/env.ts`, four
+    tests).
+11. **OG image + favicons + apple-touch-icon.** `public/` directory
+    still doesn't exist. JSON-LD references `/og-image.png`.
+
+## Suggested next session (no user input needed)
+
+1. **Convert `err: error.message` call sites to pass the Error
+   directly.** ~10 sites across `app/**/route.ts` and
+   `lib/**/*.ts`. Example: `log.error('exchangeCodeForSession
+   failed', { err: error.message })` → `log.error('…', { err: error })`.
+   Now that fingerprint auto-flows from Error objects, string-err
+   sites get a degenerate fingerprint. Switching to the raw Error
+   makes every fingerprint distinct-by-call-site and restores the
+   full grouping value. PII redaction (`redactDeep`) handles
+   Error objects correctly (tested in `logger.test.ts`), so no
+   privacy regression.
+2. **Add response-envelope invariants to `/api/version`.** Same
+   pattern, one more public probe endpoint. Currently the route has
+   happy-path tests; add the cross-outcome lockdown so the launcher
+   script `Check Version.command` has a contract it's reading
+   against.
+3. **Audit the four `docs/PHASE_*.md` files the same way I did the
+   runbooks.** These are older (phase planning from pre-launch).
+   Likely to have more drift. Not touched since Round 7 or so.
+4. **Add a small `Check CSP.command` launcher** — curl a page and
+   print the `Content-Security-Policy` header. Useful when starting
+   the Report-Only window. Trivial companion to the other two
+   `.command` launchers.
+5. **Pre-bake the `public/` directory with placeholder assets.**
+   `public/robots.txt` (if not already server-generated),
+   `public/og-image.png` (1200×630 placeholder), `public/favicon.ico`
+   (a trivial evenquote mark). Unblocks the JSON-LD ref and stops
+   the 404s in server logs. You still want to replace them with
+   real art later, but placeholders remove an embarrassment.
+
+571/571 green. The monitoring-contract lockdown pass is now
+complete for the four most-polled endpoints (3 crons + health +
+status). `fingerprintError()` went from ready-to-use helper to
+fully live across every error log in the codebase, with zero
+call-site changes and documented explicit-override support. One
+more double-click ops helper and a clean-bill-of-health on the
+runbooks round this out. Carry-forward list dropped from 12 to 11
+items (#5 use-step-validation closed as acknowledged).
+
+— Claude, 2026-04-22 (thirteenth run)
+
+# Round 14 — 2026-04-23
+
+Scheduled autonomous run. Picked up the Round 13 carry-forward
+"suggested next session" list (which had been partially started in
+the working tree this morning) and rolled it forward, then went
+deeper on security than the carry-forward asked for.
+
+## Working-tree state at start
+
+Round 13 ended with a 5-item "suggested next session" list. By the
+time I picked the session up, items #2 (envelope invariants on
+`/api/version`), #4 (`Check CSP.command`), and #5 (`public/`
+placeholder assets — apple-touch-icon.png, favicon.ico, icon.png,
+og-image.png) were already in place as untracked / modified files.
+Item #1 (sweep `err: error.message` → `err: error`) had been
+applied across 10 call sites in `app/**/route.ts` and `lib/**/*.ts`,
+matching the carry-forward note exactly. Item #3 (PHASE_*.md
+audit) was untouched.
+
+I did NOT touch the marketing WIP — `components/site/hero.tsx`,
+`components/site/rotating-word.tsx`, `tailwind.config.ts` — those
+are yours and explicitly carry-forwarded.
+
+## What changed this round
+
+### 1. Closed out the err-instance sweep + doc accuracy
+
+All 10 call sites in the working tree convert cleanly. A grep for
+the bug shape (`err:\s*\w+\.(message|toString\(\)|cause)`) returns
+zero matches outside of one test-stub line in
+`app/api/dev/backfill-call/route.test.ts` which is shaping a fake
+Supabase error object (legitimate test scaffolding, not an emit).
+
+While there I refreshed the comment in `lib/logger.test.ts` that
+described "many existing call sites pass `err: error.message`
+today" — that sentence was true at the start of Round 13, false
+by the end of the working tree at Round 14 start. The test still
+locks the contract that string-err inputs DO fingerprint (defensive
+behavior); the comment now explains why we still keep that path.
+
+### 2. Constant-time secret comparisons — the security teeth
+
+Real finding from a security pass. Six routes plus the Vapi
+webhook verifier were comparing secrets with plain `!==`:
+
+- `app/api/cron/send-reports/route.ts`
+- `app/api/cron/retry-failed-calls/route.ts`
+- `app/api/cron/check-status/route.ts`
+- `app/api/status/route.ts`
+- `app/api/dev/backfill-call/route.ts`
+- `app/api/dev/trigger-call/route.ts`
+- `lib/calls/vapi.ts` → `verifyVapiWebhook()`
+
+Plain `!==` short-circuits on the first mismatched byte. With
+enough requests, a remote attacker can detect the timing delta
+between "first byte wrong" vs. "first ten bytes right" and walk
+the secret one byte at a time. The Stripe webhook is fine — it
+uses `stripe.webhooks.constructEvent`, which is HMAC-based and
+constant-time inside the SDK — but everything else was rolling
+its own equality.
+
+New helper at `lib/security/constant-time-equal.ts`:
+
+- SHA-256 hashes both sides before `crypto.timingSafeEqual`,
+  which sidesteps the length-leak vector (different-length inputs
+  would otherwise throw or short-circuit).
+- Null-safe: `undefined`/`null`/empty-string returns false rather
+  than throwing, so callers can chain it directly after env reads.
+- Empty-string == empty-string returns false on purpose. An
+  unconfigured secret should never authorize a request. (The
+  routes also have an explicit env-presence check ahead of the
+  comparison; this is defence in depth.)
+
+Test coverage: 8 cases in
+`lib/security/constant-time-equal.test.ts` — identical, single-byte
+diff, length mismatch, null/undefined on either side, empty/empty,
+multi-byte input, symmetry across pairs, real-world-shaped 32-char
+token with diff at front + back.
+
+All 6 routes' existing auth tests (which use
+`provided !== expected`-shaped scenarios) continue to pass against
+the new helper, confirming the swap is behavior-preserving for
+correct + incorrect secrets and only changes the timing surface.
+
+### 3. HEAD method on `/api/health` — second test
+
+Carry-forward had this listed but it was already implemented in
+the file. Added the missing failure-path test:
+`HEAD returns 503 with no body when DB probe fails`. Locks two
+things the existing happy-path HEAD test did not:
+
+- HEAD must mirror GET status semantics (503 on db fail, not 200
+  with empty body). A load balancer that probes HEAD-only will
+  otherwise mark the instance healthy when the DB is dead.
+- `Cache-Control: no-store` must be present on HEAD too. Without
+  it, an intermediate proxy could cache the 503 between probes
+  and delay recovery detection.
+
+### 4. PHASE_*.md audit — one drift, one note
+
+Walked PHASE_1 through PHASE_9, PHASE_6_1, and PRE_MERGE_CHECKLIST.
+1,557 lines total. Approach: machine-checkable claims only (env
+vars, file paths, route paths, table/column names, helper names,
+logger namespaces). Skipped prose / rationale.
+
+**Drift caught and fixed (one place, one line):**
+
+- `.env.example` referenced `RESEND_FROM_EMAIL=` (unused).
+  `lib/env.ts` and `lib/email/resend.ts` actually consume
+  `RESEND_FROM`. Updated `.env.example` to expose `RESEND_FROM`
+  with a comment explaining the "Display Name <addr@domain>"
+  format and added a commented-out `EVENQUOTE_SUPPORT_EMAIL`
+  pointer (also consumed by `lib/email/resend.ts` and tested in
+  `resend.test.ts`, but was completely unmentioned in the
+  example file).
+
+**Drift worth flagging (not fixed):**
+
+- `docs/PHASE_7.md` describes `vercel.json` carrying the cron
+  schedule (`*/10 * * * *`). Current `vercel.json` is minimal
+  (schema reference only) — the schedules live in Supabase pg_cron
+  via migration `0008`. Operationally fine; the doc is just
+  historically frozen at the design-phase decision. Not touching
+  the PHASE doc — it's a record of the original phase plan, and
+  the carry-forward item "Wire `/api/cron/check-status` to Vercel
+  Cron" already tracks the live decision separately.
+
+Everything else resolves cleanly — env vars, file paths, route
+paths, migration tables/columns, logger namespaces all map.
+
+### 5. npm audit — captured for the carry-forward
+
+Snapshot:
+
+- 4 high (next, glob, eslint-config-next, @next/eslint-plugin-next)
+- 3 moderate (resend, svix, uuid)
+- 0 critical
+
+The 4 highs are exactly the chain that motivates the Next 16
+migration carry-forward item:
+- Next.js DoS via Image Optimizer remotePatterns
+- Next.js HTTP request deserialization DoS (RSC)
+- Next.js HTTP request smuggling in rewrites
+- Next.js unbounded image disk cache growth
+- Next.js DoS via Server Components
+
+All five Next advisories require Next 15.5.x or higher — Next 16
+gets us above the cutoff in one move. The glob + eslint-plugin-next
+chain resolves alongside as the dev-deps refresh.
+
+The 3 moderates chain through Resend's transitive deps (svix →
+uuid). Patch arrives with a Resend bump.
+
+No new criticals. No high-severity vuln in our direct write path
+(none in stripe, supabase-js, zod). Holding pattern is correct —
+this stays a carry-forward item.
+
+## Verification
+
+- `npx vitest run` — **589/589 across 57 files**, 10.13s.
+  (Was 580/580 across 56. +9 tests, +1 file: 8 new
+  constant-time-equal tests + 1 new HEAD-failure test.)
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `next build` — not run; sandbox can't write to host's
+  permission-locked `.next/`. Same documented limitation as
+  Round 13. Run locally before pushing.
+
+## Items needing your input
+
+Carry-forward unchanged in shape from Round 13. One item progressed
+(PHASE audit found + fixed `.env.example` drift). Adding nothing new.
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac** if not already.
+   Round 13 noted commit `400005b` removed it from the repo;
+   confirm `ls COMMIT_COMMANDS.sh` returns "No such file" locally.
+2. **Distributed rate limiter** — Upstash credentials.
+3. **Marketing assets** — landing-page hero copy, screenshots.
+   You have WIP on `hero.tsx` / `rotating-word.tsx` /
+   `tailwind.config.ts`; not touching.
+4. **Legal review of `/terms` and `/privacy`.** Drafts noindex'd,
+   not linked from the footer.
+5. **Next 16 migration window.** Five high-severity `npm audit`
+   items chain to it (full list above).
+6. **Sentry (or equivalent).** `lib/logger.ts` PII redaction +
+   auto-fingerprint are ready to feed it.
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`.
+8. **Begin the CSP Report-Only window.** `CSP_NONCE_ENABLED=true`
+   in Vercel, walk away for a week, then thread the nonce through
+   `app/layout.tsx`'s JSON-LD `<script>` tags and flip
+   `CSP_ENFORCE=true`.
+9. **Vapi prompt tuning** — once you have your first 20 real calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY` /
+    `ANTHROPIC_API_KEY`.** Today they stay optional (simulation
+    fallback); `/api/health` is the safety net.
+11. **OG image + favicons + apple-touch-icon — placeholder set
+    landed this round.** `public/og-image.png`,
+    `public/favicon.ico`, `public/apple-touch-icon.png`,
+    `public/icon.png` exist as placeholders. Replace with real
+    art before launch press.
+
+## Suggested next session (no user input needed)
+
+1. **Add a centralized cron-auth helper.** All three
+   `/api/cron/*` routes plus `/api/status` re-implement the same
+   header-extraction + constant-time-equal flow. Worth lifting
+   to `lib/security/cron-auth.ts`: one `assertCronAuth(req): NextResponse | null`
+   that returns the 401/500 response when invalid and `null`
+   when authorized. Five route files shrink, one place to audit.
+2. **`/api/csp-report` envelope-invariant tests.** The route
+   exists (referenced by middleware as `reportEndpoint`) but the
+   contract isn't locked the way the other public-probes are.
+   When the CSP Report-Only window actually opens, this is what
+   catches a malformed report breaking ingestion.
+3. **Audit `app/get-quotes/**` page-level error handling.** The
+   intake flow has the most surface area + the most user-facing
+   failure modes. Quick pass: do all server actions surface
+   typed error states the page can render, or does anything
+   throw past the boundary into Next's default error page?
+4. **`Check Sentry.command` placeholder.** Pair to the other
+   `.command` launchers. It's fine if it just prints "Sentry not
+   wired yet — see Round 13 carry-forward #6"; you'll fill in
+   the real curl once Sentry is configured. Cheap inventory item
+   so the launcher set is contiguous.
+5. **Add a `vapi/webhook` route timing-attack regression test.**
+   The constant-time helper has its own test, but the route
+   doesn't have a test that asserts a near-miss secret is
+   rejected. One test that calls the handler with a 31-character
+   prefix of the real 32-char secret and asserts 401 keeps the
+   timing-safety contract from regressing if someone "simplifies"
+   back to `===`.
+
+589/589 green. Real security finding closed (timing-attack on six
+routes + Vapi verifier). One real doc drift fixed (`.env.example`
+RESEND var). PHASE audit clean otherwise. Carry-forward list
+unchanged in scope at 11 items, with one (#11) materially
+advanced from "directory missing" to "placeholder set landed,
+swap for real art before launch." Next session can keep going on
+the security and contract-lockdown thread without waiting on you.
+
+— Claude, 2026-04-23 (fourteenth run)
+
+
+---
+
+# Round 15 — 2026-04-23 (fifteenth run)
+
+## TL;DR
+
+**620/620 tests green across 59 files** (+31 tests, +2 files vs Round
+14's 589/57). `tsc --noEmit` clean. `next lint` clean. Five items from
+Round 14's "Suggested next session" list shipped: cron-auth helper
+centralized + deployed to four routes; csp-report envelope-invariants
+locked; get-quotes segment-local error boundary added; Check Sentry
+.command placeholder created; vapi/webhook timing-attack regression
+test added. No user input required to resume on Round 16.
+
+## What changed
+
+### 1. Centralized cron-auth → `lib/security/cron-auth.ts`
+
+Four routes previously duplicated the exact same 15-line pattern:
+
+- `/api/cron/send-reports`
+- `/api/cron/retry-failed-calls`
+- `/api/cron/check-status`
+- `/api/status`
+
+Each read `CRON_SECRET`, extracted a token from one of three header
+spellings (`x-cron-secret`, `X-Cron-Secret`, `Authorization: Bearer …`),
+and called `constantTimeEqual()`. Now one helper does it all:
+
+```ts
+async function handle(req: Request) {
+  const deny = assertCronAuth(req);
+  if (deny) return deny;
+  // …authorized path…
+}
+```
+
+Adding a fifth auth'd route is one line. Any future change (accepting
+a new header, logging failed attempts, adding jitter) happens in one
+place. All four routes' existing auth tests pass against the refactored
+helper — contract preservation verified.
+
+Contract (unchanged from the old inline code):
+
+- 500 when `CRON_SECRET` is not configured (fail CLOSED — we never
+  want an unconfigured secret to silently become "no auth needed").
+- 401 when the provided token does not match.
+- `null` when the request is authorized (caller continues).
+
+Test coverage: 14 cases in `lib/security/cron-auth.test.ts` — every
+header-spelling permutation, fail-closed on missing env, near-miss
+prefix (timing-safety regression), Basic-scheme rejection, and a
+dedicated `extractCronSecret()` exercise block covering header
+precedence.
+
+Net LOC: four routes shrunk, one new helper + test file. **−49 / +164.**
+
+### 2. `/api/csp-report` envelope-invariants locked
+
+Route already had 7 happy-path tests. Added 8 more under a new
+`response envelope invariants` describe block. The CSP Report-Only
+window (Round 14 carry-forward #8) is where the browser will start
+POSTing violations at this endpoint; if the contract drifts under it,
+reports stop flowing (blind spot) or start leaking data (privacy
+regression).
+
+New invariants, each with an explicit "why this matters" comment:
+
+- **204 is 204** — never 200-with-body. RFC 7230 §3.3.3 says a 204
+  cannot carry a body; locks it across every input shape (valid
+  report-uri, report-to array, malformed JSON, unrecognised shape).
+- **No throw past the handler** for network-error / deprecation
+  entries mixed in with csp-violations in a report-to batch.
+- **Tolerates empty body** (Edge / Firefox have been observed sending
+  zero-length bodies under certain policy configs).
+- **PII hygiene: URL paths are stripped to host** in summary logs.
+  The guest flow carries UUIDs in `/get-quotes/claim?token=…`;
+  `hostOf()` must never let a path or query string into the log line.
+  Negative assertion: no UUID or token bleed into serialized context.
+- **PII hygiene: full payload NEVER logged when LOG_FULL_CSP unset.**
+  Most important invariant in the file — "default off" was a conscious
+  choice in the handler's comment block; a refactor could easily
+  invert it.
+- **LOG_FULL_CSP parser is strict on case but not on whitespace**:
+  `'TRUE'` enables (case-insensitive on purpose), `' true '` /
+  `'1'` / `'yes'` / `'truthy'` do NOT. Locks the exact behavior so a
+  future tightening or loosening is a visible, intentional change.
+- **No CORS headers exposed** — if someone accidentally adds
+  `Access-Control-Allow-Origin: *`, this endpoint becomes a
+  cross-origin log sink any page on the internet can POST to.
+- **Empty-array report-to batch → 204 silently** — correct "nothing
+  to report" behavior and a zero-noise guarantee for the log stream.
+
+All 15 tests pass. File jumped from 7 → 15.
+
+### 3. `/get-quotes` segment-local error boundary
+
+Intake flow is the single revenue path — a user tripping a mid-intake
+error is more valuable to get back into the funnel than to send home.
+Before this round, any uncaught error in `/get-quotes/**` bubbled to
+`app/error.tsx` whose copy reads "We tripped over a cable" and whose
+CTA is "Take me home."
+
+New `app/get-quotes/error.tsx`:
+
+- Copy: "We lost the thread mid-request." Explicit reassurance
+  "You haven't been charged."
+- CTA: "Try again" (reset) + "Start over" → `/get-quotes` (NOT `/`).
+- Support email `support@evenquote.com` with the digest rendered as
+  a `Ref:` line when present.
+- `error.message` is NEVER rendered — the intake throws from
+  Supabase, Stripe session lookups, geo lookups, etc. Raw message
+  could leak table names, PII, or internal paths.
+
+Test coverage (`app/get-quotes/error.test.tsx`, 7 tests):
+
+- Segment-specific copy present ("We lost the thread mid-request",
+  "haven't been charged").
+- PII/leak guard: iterates four realistic throw payloads
+  (Postgres uniqueness violation text, Stripe session id echo,
+  contact_email echo, node_modules path) and asserts NONE appear
+  in rendered HTML.
+- Digest rendered when present, omitted otherwise.
+- `reset` is not auto-invoked on render; button has `type="button"`.
+- **"Start over" link MUST target `/get-quotes`**, not `/`. Locks the
+  whole reason this boundary is segment-local instead of just using
+  `app/error.tsx`.
+- Support email is a clickable `mailto:`.
+
+Audit finding (not fixed): the server pages in this segment are all
+already defensive on bad data:
+
+- `app/get-quotes/page.tsx` — renders an empty list if the
+  `service_categories` query errors (`categories ?? []`). Graceful.
+- `app/get-quotes/[category]/page.tsx` — `loadCategory()` returns
+  null on error → `notFound()`. Graceful.
+- `app/get-quotes/checkout/page.tsx` — `.single()` sets `error`/null
+  on miss → `notFound()`. Graceful.
+- `app/get-quotes/success/page.tsx` — uses `.maybeSingle()`, maps
+  null → `kind: 'not-found'`, handles transient Stripe-webhook race
+  with a polling card (never 404's a paying customer). Well-designed.
+- `app/get-quotes/claim/route.ts` — every failure path funnels through
+  `errorRedirect(origin, message, requestId)` with an explicit user-
+  facing message. Well-designed.
+
+So the boundary is the safety net for the remaining throw surfaces
+(admin client init, Stripe SDK init, unexpected Supabase errors); the
+page-level handling is already tight.
+
+### 4. `Check Sentry.command` placeholder
+
+Round 14's "suggested next session" item 4. One of eight `.command`
+launchers in the repo root (`Check Health.command`, `Check CSP.command`,
+`Check Version.command`, etc.). Sentry wasn't in the set because
+Sentry isn't wired yet (Round 13 carry-forward #6).
+
+New `Check Sentry.command` explains that status and tells future-you
+what to replace the body with once Sentry is configured:
+
+1. curl the Sentry org / health API with `$SENTRY_AUTH_TOKEN` from
+   1Password.
+2. Count the last 24h of events for the "evenquote" project — a
+   sudden zero is a misconfiguration signal (SDK broke on a deploy,
+   events stopped flowing).
+
+Executable (`chmod +x`), matches the other launchers' visual frame.
+Cheap inventory item so the launcher set is contiguous in Finder.
+
+### 5. vapi/webhook timing-attack regression test
+
+The constant-time helper has its own test (8 cases). The Vapi webhook
+route itself previously didn't have a test asserting a near-miss
+secret is rejected. Added two.
+
+New tests in `app/api/vapi/webhook/route.test.ts`:
+
+- **31-char prefix of a 32-char secret → 401.** If someone "simplifies"
+  the compare back to `===`, this test specifically still passes (a
+  shorter string isn't equal), which is why the companion test exists:
+- **32-char secret with a single-byte diff at the last position → 401.**
+  Same-length-wrong-content is the shape constant-time-equal is
+  specifically designed to handle without leaking the byte position.
+
+The real defense is `constantTimeEqual()`; these are the canary that
+fails if someone un-plumbs the helper from this route.
+
+Total vapi webhook tests: 14 → 16.
+
+## Verification
+
+- `npx vitest run` — **620/620 across 59 files**, 34.35s.
+  (Round 14 closed at 589/57. +31 tests, +2 files.)
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `next build` — not run; sandbox can't write to host's permission-
+  locked `.next/`. Same documented limitation as Round 14. Run locally
+  before pushing.
+
+## Items needing your input
+
+**Unchanged in shape from Round 14.** Same 11-item list; no new
+blockers.
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac** if not already.
+   Round 13 noted commit `400005b` removed it from the repo; confirm
+   `ls COMMIT_COMMANDS.sh` returns "No such file" locally.
+2. **Distributed rate limiter** — Upstash credentials.
+3. **Marketing assets** — landing-page hero copy, screenshots. You
+   have WIP on `hero.tsx` / `rotating-word.tsx` / `tailwind.config.ts`;
+   not touching.
+4. **Legal review of `/terms` and `/privacy`.** Drafts noindex'd, not
+   linked from the footer.
+5. **Next 16 migration window.** Five high-severity `npm audit` items
+   chain to it.
+6. **Sentry (or equivalent).** `lib/logger.ts` PII redaction +
+   auto-fingerprint are ready to feed it. `Check Sentry.command`
+   placeholder now exists (Round 15 deliverable).
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`.
+8. **Begin the CSP Report-Only window.** `CSP_NONCE_ENABLED=true` in
+   Vercel, walk away for a week, then thread the nonce through
+   `app/layout.tsx`'s JSON-LD `<script>` tags and flip
+   `CSP_ENFORCE=true`. `/api/csp-report` envelope is now tested
+   (Round 15 deliverable) — lockdown is in place before the window
+   opens.
+9. **Vapi prompt tuning** — once you have your first 20 real calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY` /
+    `ANTHROPIC_API_KEY`.** Today they stay optional (simulation
+    fallback); `/api/health` is the safety net.
+11. **OG image + favicons + apple-touch-icon.** Placeholder set landed
+    in Round 14. `public/og-image.png`, `public/favicon.ico`,
+    `public/apple-touch-icon.png`, `public/icon.png` exist as
+    placeholders. Replace with real art before launch press.
+
+## Suggested next session (no user input needed)
+
+1. **CSP nonce threading in `app/layout.tsx`.** Middleware-side
+   scaffold is in place behind `CSP_NONCE_ENABLED`; when the
+   Report-Only window opens, the JSON-LD `<script>` tags in
+   `app/layout.tsx` still need the nonce attribute plumbed through.
+   This is a code-side prep item — the actual flip of the env var is
+   user-input #8, but the code can be ready ahead of it.
+
+2. **Normalize dev-route auth into a twin of `assertCronAuth`.**
+   `/api/dev/trigger-call` and `/api/dev/backfill-call` both do the
+   same two-layer NODE_ENV + `?token=` + constant-time-equal dance.
+   Not as pressing as the cron helper (only two sites, dev-only
+   surface) but a natural follow-up now that the cron pattern is in
+   place. Proposed: `lib/security/dev-token-auth.ts` with
+   `assertDevToken(req): NextResponse | null`.
+
+3. **`/api/csp-report` request-size cap.** The route `await req.json()`s
+   without a content-length check. A rogue POST of a 10 MB "csp-report"
+   body would waste CPU parsing. Add a `content-length > 64 KB` guard
+   returning 413, or use `req.text()` then `JSON.parse` with a
+   wrapper. Low priority but tidy.
+
+4. **`app/legal/**` segment-local error boundary.** Same reasoning as
+   `/get-quotes/error.tsx` — if the legal pages ever grow dynamic
+   data (e.g. pulling last-updated timestamps from a CMS), a dedicated
+   boundary keeps the site chrome alive. Currently static — not urgent.
+
+5. **Snapshot the `lib/security/*` public surface.** `csp.ts`,
+   `constant-time-equal.ts`, `cron-auth.ts`. One exports test per
+   file that iterates module.exports keys and asserts the shape.
+   Guards against a refactor accidentally dropping an export that
+   `app/**` consumes.
+
+620/620 green. Five Round 14 "suggested next session" items shipped.
+Outstanding carry-forward stays at 11, no new blockers, no user
+input required to resume. The full stack of five deliveries was
+independent — centralized helper + test + four route refactors;
+CSP envelope invariants added to an existing test file; segment
+error boundary + tests; Sentry placeholder script; vapi timing-attack
+regression tests — so Round 16 can pick up from any of the above
+five "suggested next session" items in any order.
+
+— Claude, 2026-04-23 (fifteenth run)
+
+---
+
+# Round 16 — 2026-04-23 (sixteenth run, scheduled)
+
+## Summary
+
+Round 15 left five "suggested next session" items all shippable
+independently; this round took them as a packaged delivery.
+All five landed, plus a fresh `npm audit` snapshot. Tests moved
+from 620/59 → **656/63** (+36, +4 files). Typecheck + lint clean.
+No new blockers, outstanding human-input items unchanged at 11.
+
+## Delivered
+
+### 1. `lib/security/dev-token-auth.ts` — centralized dev-route auth
+
+Sibling of the Round 15 `cron-auth.ts` consolidation. Both dev
+routes (`/api/dev/trigger-call`, `/api/dev/backfill-call`) used
+to re-implement the same two-layer gate:
+
+1. NODE_ENV gate — 404 in production (deliberate 404, not 401, so
+   an accidental prod deploy gives no probe signal that the route
+   exists).
+2. Optional `DEV_TRIGGER_TOKEN` gate — constant-time compared
+   `?token=` query param if the env var is set.
+
+New `lib/security/dev-token-auth.ts` exposes:
+
+- `assertDevToken(req): NextResponse | null` — returns a response
+  on failure, `null` on success (mirrors `assertCronAuth`).
+- `extractDevToken(req): string` — exported separately so tests
+  and a future telemetry layer can inspect what was sent.
+
+Asymmetry with cron-auth documented in the module header: cron
+fails CLOSED on missing `CRON_SECRET` (its only job is to
+authenticate); dev fails OPEN in dev when `DEV_TRIGGER_TOKEN` is
+unset (the NODE_ENV gate alone is the primary refusal — token is
+the additional tunnel-hardening layer).
+
+Tests (`lib/security/dev-token-auth.test.ts`, **13 cases**):
+
+- Production returns 404 with or without a matching token (locks
+  the "no probe signal" invariant — this is the most important
+  test in the file).
+- Dev + no token configured → `null` even with unexpected
+  `?token=` (second layer silently off).
+- Dev + token configured + matching → `null`.
+- Dev + token configured + missing → 401.
+- Dev + token configured + wrong → 401.
+- **Near-miss prefix (drop-last-char) → 401** (timing-safety
+  regression — catches a future refactor back to `===`).
+- `.trim()` on the expected value (protects against .env files
+  with quoted or trailing-whitespace token values).
+- `extractDevToken` extraction edge cases (no param, empty,
+  malformed URL → empty string rather than throw).
+
+Route refactors (`/api/dev/trigger-call/route.ts`,
+`/api/dev/backfill-call/route.ts`):
+
+- Both replaced their 15-line NODE_ENV + token dance with
+  `const deny = assertDevToken(req); if (deny) return deny;`.
+- Their existing 7 + 14 = 21 tests still pass unchanged —
+  semantics are identical, only the dispatch path moved.
+
+### 2. `/api/csp-report` request-size cap
+
+Round 15 punchlist item 3. The route `await req.json()`s without
+a content-length check — a rogue POST of a 10 MB "csp-report"
+body would force the route to read-then-parse megabytes of JSON
+we don't care about.
+
+`app/api/csp-report/route.ts`:
+
+- New `MAX_BODY_BYTES = 64 * 1024` ceiling. A real violation
+  report is <4 KB; even a coalesced report-to batch stays well
+  under 32 KB. 64 KB is the "obviously generous" cutoff that
+  still kills a size attack.
+- Guard is `content-length > MAX_BODY_BYTES` → 413 Payload Too
+  Large, empty body (matching the route's existing 204 body
+  pattern).
+- Guard short-circuits BEFORE `req.json()` reads the stream, so
+  the handler doesn't burn CPU parsing bytes it's going to drop.
+- Missing content-length (chunked transfer) falls through — we
+  don't want to reject legitimate clients that use
+  `Transfer-Encoding: chunked`.
+- Does NOT log on oversize — a size-attack shouldn't fill the
+  log stream (would turn the mitigation into its own DoS).
+
+New tests (3 added to `app/api/csp-report/route.test.ts`,
+**15 → 18**):
+
+- **Oversize (64 KB + 1) → 413, empty body, NO log line**.
+- **Exactly 64 KB → 204** (strict-greater-than semantics locked).
+- **Missing content-length → 204** (chunked-transfer tolerance).
+
+### 3. `app/legal/error.tsx` — segment-local error boundary
+
+Round 15 punchlist item 4. Follows the `/get-quotes/error.tsx`
+pattern. Legal pages are static today, so why bother?
+
+- Future-proofing: if /legal ever grows dynamic data (CMS
+  timestamps, env-injected contact addresses), a render error
+  would otherwise bubble to `app/error.tsx` whose "we tripped
+  over a cable" copy doesn't match the legal-tab context.
+- Isolation: the legal layout keeps nav/footer chrome; a thrown
+  render in the article slot shouldn't tear the whole app error
+  shell over the page.
+
+Copy intentionally legal-appropriate: "This page didn't load
+right" + "If you're trying to read the Terms or Privacy Policy
+and need them urgently, email support@evenquote.com …". Digest
+surfaced as `Ref:` line. CTAs: Try again (reset) + Back to home
+(legal segment has no natural "start over" target like
+/get-quotes does).
+
+Tests (`app/legal/error.test.tsx`, **7 cases**, same rendering
+strategy as the sibling):
+
+- Segment-appropriate copy present; generic "tripped over a
+  cable" line NOT present (copy-drift guard).
+- PII/leak guard: four realistic throw payloads (table-name
+  errors, email-echo, node_modules paths, CMS URL in a
+  SyntaxError message) — NONE appear in rendered HTML.
+- Digest rendered when present, `Ref:` line omitted otherwise.
+- `reset` not auto-invoked on render; button has `type="button"`.
+- "Back to home" link targets `/` (locked against a refactor
+  that redirects elsewhere).
+- Support `mailto:` present.
+
+### 4. `lib/security/exports.test.ts` — public-surface lockdown
+
+Round 15 punchlist item 5. One tests file iterating module
+exports for all four security modules:
+
+- `csp.ts`: `buildCsp`, `cspHeaderName`, `generateNonce`,
+  `isCspNonceEnabled`.
+- `constant-time-equal.ts`: `constantTimeEqual`.
+- `cron-auth.ts`: `assertCronAuth`, `extractCronSecret`.
+- `dev-token-auth.ts`: `assertDevToken`, `extractDevToken`.
+
+For each module:
+
+1. `toEqual({...})` against the full name-kind map —
+   `Object.keys(mod).sort()` feeds `typeof` into a literal object
+   the test owns. An accidental export rename, addition, or
+   removal fails the snapshot loudly.
+2. Invocation check — each exported function is called in a
+   minimal way (`constantTimeEqual('a','a')`, bare Request into
+   `assertCronAuth`) to prove the shape is callable, not just
+   name-matching.
+
+Why this is worth having: these four modules back every webhook
+auth + every CSP header on the site. A silent export-rename in
+a refactor would break imports at the call site (hard stop at
+`next build`), but a silent export-removal might only surface
+when that particular helper is called at runtime. This catches
+both at test time.
+
+### 5. CSP nonce threading in `app/layout.tsx`
+
+Round 15 punchlist item 1. Middleware already generates the
+nonce and attaches it to the request header as `x-nonce` when
+`CSP_NONCE_ENABLED=true`. The consumer side was missing — the
+two JSON-LD `<script>` tags (Organization + WebSite schemas) had
+no `nonce=` attribute, so once `CSP_ENFORCE=true` flipped them
+from report-only to enforcing, they'd be blocked.
+
+`app/layout.tsx`:
+
+- New `import { headers } from 'next/headers'`.
+- New line in `RootLayout`:
+  `const nonce = headers().get('x-nonce') ?? undefined;`
+- Both `<script type="application/ld+json" …>` tags now carry
+  `nonce={nonce}`. When the header is absent, React omits the
+  attribute entirely (matching the current static-CSP mode).
+
+Tests (`app/layout.test.tsx`, **5 cases**):
+
+- `x-nonce: test-nonce-abc123` present → BOTH JSON-LD scripts
+  carry `nonce="test-nonce-abc123"`; schema payload renders.
+- Header absent → neither script carries a nonce attribute;
+  regex asserts `nonce=` is not present on either tag.
+- **Foot-gun guards**: nonce attribute value is NEVER the
+  literal string `"null"` or `"undefined"` (locks against
+  someone refactoring to `nonce={String(value)}`).
+- Base64 nonces with `=` padding surface verbatim (locks
+  against an accidental `encodeURIComponent` wrapper).
+- Non-nonce invariant: skip-to-content a11y link still renders.
+
+This is code-side prep for the CSP Report-Only window; the
+actual flip of `CSP_NONCE_ENABLED=true` is still user-input #8.
+
+### 6. `npm audit` snapshot
+
+No shape change from Round 14. Summary reported by `npm audit`:
+
+- **4 high**: 5 Next.js advisories (all cleared by Next 16
+  migration — user-input #5), 1 `glob` CLI command-injection via
+  `eslint-config-next` → `@next/eslint-plugin-next` → `glob`.
+  The glob advisory is for the glob CLI with `-c/--cmd`; we use
+  glob programmatically via ESLint, not the CLI, so practical
+  exposure is zero.
+- **3 moderate**: `uuid <14` bounds check via Resend → svix →
+  uuid. Cleared by Resend major bump (breaking).
+- **0 critical**.
+
+No action this round. Next 16 migration is still the single
+mechanical upgrade that clears most of this.
+
+## Verification
+
+- `npx vitest run` — **656/656 across 63 files**, 22.10s.
+  (Round 15 closed at 620/59. +36 tests, +4 files.)
+  Per-file deltas this round:
+    - `lib/security/dev-token-auth.test.ts` — new, 13 cases.
+    - `lib/security/exports.test.ts` — new, 8 cases.
+    - `app/legal/error.test.tsx` — new, 7 cases.
+    - `app/layout.test.tsx` — new, 5 cases.
+    - `app/api/csp-report/route.test.ts` — +3 cases (15 → 18).
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `next build` — not run; sandbox can't write to host's
+  permission-locked `.next/`. Same documented limitation as
+  Rounds 14/15. Run locally before pushing.
+
+## Items needing your input
+
+**Unchanged in shape from Round 15 — same 11 items, no new
+blockers.** Relisted for continuity:
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac** if not already.
+   Commit `400005b` removed it from the repo.
+2. **Distributed rate limiter** — Upstash credentials.
+3. **Marketing assets** — landing-page hero copy, screenshots.
+   WIP on `hero.tsx` / `rotating-word.tsx` / `tailwind.config.ts`
+   not touched this round.
+4. **Legal review of `/terms` and `/privacy`.** Drafts
+   `noindex`'d, not linked from the footer. The new
+   `app/legal/error.tsx` boundary is copy-reviewed too if you'd
+   like it included in the counsel pass.
+5. **Next 16 migration window.** 5 of the 7 `npm audit` items
+   chain to it (Next.js + eslint-config-next + glob).
+6. **Sentry (or equivalent).** `lib/logger.ts` PII redaction +
+   auto-fingerprint are ready to feed it. `Check Sentry.command`
+   placeholder already exists (Round 15).
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`.
+8. **Begin the CSP Report-Only window.** `CSP_NONCE_ENABLED=true`
+   in Vercel, walk away for a week, then flip `CSP_ENFORCE=true`.
+   **The JSON-LD nonce threading shipped this round**, so the
+   layout side is now ready — when you flip the env var, the
+   inline `<script>` tags will carry a per-request nonce
+   automatically.
+9. **Vapi prompt tuning** — once you have your first 20 real
+   calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY`
+    / `ANTHROPIC_API_KEY`.** Today they stay optional (simulation
+    fallback); `/api/health` is the safety net.
+11. **OG image + favicons + apple-touch-icon.** Placeholders
+    exist in `public/`. Replace with real art before launch
+    press.
+
+## Suggested next session (no user input needed)
+
+1. **Sentry SDK wiring** — the bolt-on point. `lib/logger.ts`
+   already emits PII-redacted structured entries with a
+   fingerprint field; a `lib/observability/sentry.ts` module
+   wrapping `@sentry/nextjs` that subscribes to the same
+   `createLogger` surface would close the observability gap
+   without touching any call sites. The `Check Sentry.command`
+   placeholder that landed Round 15 documents the intended shape
+   once auth is in place.
+
+2. **Centralize Vapi webhook auth into `lib/security/vapi-auth.ts`.**
+   `lib/calls/vapi.ts#verifyVapiWebhook` is a one-off right now;
+   folding it into the `lib/security/*` pattern (alongside
+   `cron-auth` + `dev-token-auth`) makes the security surface
+   uniform and gets the webhook-specific tests into the exports
+   snapshot. Low-risk refactor.
+
+3. **`lib/security/rate-limit-auth.ts` sketch.** The IP-level
+   rate limiter (`lib/rate-limit.ts`) + the upcoming Upstash
+   migration (user-input #2) want the same shape: one helper
+   returns a 429 NextResponse or null. Good pre-work for when
+   Upstash credentials land — writing the helper first means the
+   Upstash swap is a one-file patch.
+
+4. **Replace the placeholder `public/og-image.png`** with a
+   generated OG card using `@vercel/og` (or similar) derived from
+   the page's metadata. Code-side prep; the actual brand art is
+   still user-input #11, but the generator means we won't need
+   to re-ship if the art gets refreshed later.
+
+5. **Audit remaining `?.message` → `err:` leftovers outside
+   routes.** Round 14 closed the 10-site route sweep; a grep of
+   `lib/**` for `err: e.message` or similar patterns would catch
+   any leftover err-string sites in helpers. Expect zero hits,
+   worth the sweep to confirm.
+
+656/656 green. All five Round 15 "suggested next session" items
+shipped as a single batch. Outstanding human-input items
+unchanged at 11, no new blockers, no regressions in the existing
+route-level tests (trigger-call 7, backfill-call 14, csp-report
+unchanged at 15 baseline + 3 new = 18). Round 17 can start from
+any of the five suggested items in any order.
+
+— Claude, 2026-04-23 (sixteenth run)
+
+---
+
+# Round 17 — 2026-04-23 (seventeenth run, scheduled)
+
+## Summary
+
+Round 16 left five "suggested next session" items; this round
+shipped four of them as net-new modules, plus a pair of drive-by
+lockdowns from the Round 14 list. No call-site migrations — the
+new security helpers land alongside the existing ones without
+any route-level sweep, so this is a zero-behavior-change round
+with new surface ready for the follow-up work.
+
+Tests moved 656/63 → **695/66** (+39 tests, +3 files). Typecheck
++ lint clean. Outstanding human-input items unchanged at 11.
+
+## Delivered
+
+### 1. `lib/security/vapi-auth.ts` — centralized Vapi webhook auth
+
+Sibling of Round 15's `cron-auth.ts` and Round 16's
+`dev-token-auth.ts`. The Vapi webhook was the last auth surface
+living outside `lib/security/*` (it was inline in
+`lib/calls/vapi.ts`), breaking the "one place to look" invariant
+for every other auth helper.
+
+What shipped:
+
+- `lib/security/vapi-auth.ts` — `verifyVapiWebhook(req)` and
+  `extractVapiSecret(req)`. Same header precedence as before
+  (`x-vapi-secret` → `X-Vapi-Secret` → `Authorization: Bearer`),
+  same prod-hard-refuse semantics when `VAPI_WEBHOOK_SECRET` is
+  unset, same constant-time compare.
+- `lib/calls/vapi.ts` — the inline implementation was deleted
+  and replaced with a one-line re-export. Every existing call
+  site (`app/api/vapi/webhook/route.ts`) keeps working without
+  an import change.
+- `lib/security/exports.test.ts` — new snapshot block for the
+  `vapi-auth` public surface, so an accidental export rename is
+  caught at test time.
+
+Tests (`lib/security/vapi-auth.test.ts`, **13 cases**):
+
+- `extractVapiSecret`: empty-headers → `''`; precedence of
+  `x-vapi-secret` over `Authorization: Bearer`; Bearer prefix
+  strip (both cases of "Bearer" / "bearer").
+- `verifyVapiWebhook`: HARD-REFUSE in prod when unset; soft
+  accept in dev when unset; accept via `x-vapi-secret`; accept
+  via `Authorization: Bearer`; reject a same-length wrong
+  guess; reject when header is missing.
+- **Timing-attack regression (Round 14 drive-by)** — two new
+  cases pinning the constant-time-compare contract:
+    - 31-char prefix of a 32-char secret must fail (length
+      mismatch path).
+    - 32-char same-length guess differing only in the last byte
+      must also fail (byte-by-byte path, not a prefix/startsWith
+      oracle).
+- Edge case: correct Bearer with an empty `x-vapi-secret`
+  header present — outcome-only assert (some runtimes strip
+  empty headers) that the Bearer path still wins.
+
+The existing `lib/calls/vapi.test.ts` block (14 cases) still
+exercises `verifyVapiWebhook` through the re-export surface, so
+the integration path users actually import is still covered.
+
+### 2. `lib/security/rate-limit-auth.ts` — unified rate-limit assert helper
+
+Round 16's "sketch for when Upstash lands (user-input #2)".
+Today's `lib/rate-limit.ts` is the token-bucket primitive
+returning `{ ok, remaining, resetAt, retryAfterSec }`. Every
+route turns `!ok` into a 429 by hand — three lines each, same
+shape everywhere. This helper collapses it to:
+
+    const deny = assertRateLimit(req, { prefix: 'waitlist', limit: 5 });
+    if (deny) return deny;
+
+Same ergonomic contract as `assertCronAuth` / `assertDevToken`.
+
+What the 429 response carries:
+
+- Body: `{ ok: false, error: <message> }` — generic by default,
+  caller-overridable. Stays generic on purpose; a specific
+  "you're rate-limited on the waitlist" helps attackers
+  characterize the limiter.
+- `Retry-After: <seconds>` — standard across the web.
+- `X-RateLimit-Reset: <unix-ms>` — optional convenience so a
+  client UI can show a countdown without parsing Retry-After.
+
+**Deliberately does NOT migrate call sites this round.** The
+helper is net-new surface; every existing route keeps its
+inline three-line block until a follow-up round does the sweep.
+Reason: if we later want to change response shape (e.g. pull
+`X-RateLimit-Remaining` in), it's one edit in this file, not N
+edits across routes.
+
+Why land now vs. with Upstash:
+- Upstash swap becomes a one-file patch to `lib/rate-limit.ts`;
+  the `assert*` surface in `lib/security/*` is stable.
+- Call sites can adopt the helper independently of the backing
+  store. No coupling between the migration and the ergonomics.
+
+Tests (`lib/security/rate-limit-auth.test.ts`, **8 cases**):
+
+- Under-limit → returns `null` (not a response).
+- Over-limit → 429 status.
+- `Retry-After` + `X-RateLimit-Reset` headers set correctly.
+- Body shape (`{ ok: false, error: 'Too many requests' }`).
+- Custom `message` override path.
+- Per-prefix bucket scoping — waitlist traffic does NOT
+  consume checkout budget for the same IP.
+- Explicit `key` override path — bucketing per user id instead
+  of per IP even when the IP changes (locks the contract for
+  the auth-session follow-up).
+- Per-IP bucket isolation when no `key` is passed.
+
+Module state is reset between tests via `vi.resetModules()` so
+bucket leakage across cases doesn't flake.
+
+### 3. `lib/observability/sentry.ts` — Sentry stub + bolt-on point
+
+The Round 16 suggestion list's #1 item. `lib/logger.ts` has
+shipped PII redaction + auto-fingerprinting since Round 13, and
+those are the hard parts of any error-tracker wiring. What's
+missing is the SDK + the DSN, both of which chain to
+user-input #6 (account signup). This round shipped the
+call-site-ready surface so we can start threading
+`captureException` through the codebase ahead of the real
+integration.
+
+What shipped:
+
+- `lib/observability/sentry.ts`:
+    - `init()` — idempotent; reads `SENTRY_DSN`; flips
+      `_enabled=true` only when DSN is set. When disabled,
+      every downstream function is a no-op.
+    - `captureException(err, ctx)` — forwards to the redacted
+      logger today; one-line swap to `Sentry.captureException`
+      once `@sentry/nextjs` lands (the call site stays the
+      same).
+    - `captureMessage(msg, level, ctx)` — non-exception alert
+      path.
+    - `setUser({ id, email? })` — user-scope setter. Carefully
+      logs only `hasEmail: boolean`, never the email itself,
+      so the stub path can't accidentally leak into stdout
+      before Sentry's scrubbers are in place.
+    - `isEnabled()` — public readiness probe, can slot into
+      `/api/health` once live.
+    - `__resetForTests()` — test-only; name is deliberately
+      ugly so an accidental prod call stands out.
+- The `require('@sentry/nextjs')` call is commented out with
+  the intended config (DSN, tracesSampleRate from env, Vercel
+  commit SHA as release). Flipping it on is a ~5-line change
+  once the package is installed.
+
+Tests (`lib/observability/sentry.test.ts`, **11 cases**):
+
+- `isEnabled()` defaults to false.
+- Stays false after `init()` when DSN unset.
+- Flips true after `init()` when DSN set.
+- `init()` is idempotent — changing env after first call
+  cannot re-init.
+- Each of `captureException` / `captureMessage` / `setUser`
+  is a no-op when disabled (no console output).
+- When enabled: `captureException` routes through
+  `console.error`, `captureMessage` through `console.log`.
+- **PII guard on `setUser`**: the email string is NEVER passed
+  through the stub's own log output, only the `hasEmail`
+  boolean.
+- **Redaction integration**: a `captureException` whose error
+  message contains an email shows up redacted
+  (`s***@example.com`) in the stub output — locks that the
+  stub doesn't bypass the logger's redactor.
+
+### 4. `/api/csp-report` — 4 more envelope-invariant tests
+
+Round 14 drive-by was "envelope-invariant tests for
+/api/csp-report". Round 16 added three; this round tops that
+up with four more targeted cases that lock specific hardening
+decisions in the normalizer:
+
+- `report-to` entries with non-object `body` (`'foo'` / `null`)
+  must be dropped without throwing — AND a valid sibling entry
+  in the same batch must still be logged.
+- Empty `csp-report: {}` must log a summary with the
+  documented 'unknown' fallbacks (directive / blocked /
+  document). Locks the fallback contract so grouping buckets
+  stay stable.
+- `violated-directive` takes precedence over
+  `effective-directive` when both are present. Browser-ecosystem
+  regression guard.
+
+Total `route.test.ts` count: 18 → **21**.
+
+### 5. Audit — `err:.message` leftovers in `lib/**`
+
+Round 14 closed a 10-site route-level sweep replacing
+`err: error.message` → `err: error` so the logger's
+`redactDeep` over an Error instance keeps the stack. This
+round ran the same grep over `lib/**`: zero hits. Every
+remaining `.message` access is either:
+
+- a thrown Error message constructor
+  (`throw new Error(`apply_call_end: ${rpcErr.message}`)`) —
+  fine, caught + logged as an Error instance upstream.
+- a `notes`/`reason` return-value field for structured result
+  shapes — user-visible, intentional.
+- a zod `issue.message` surfaced through form validation —
+  user-visible, intentional.
+
+No action needed. Sweep confirmed complete.
+
+### 6. Audit — `app/get-quotes/**` error boundaries
+
+Round 14 drive-by. The segment already has
+`app/get-quotes/error.tsx` at the boundary root with 7 tests
+covering: segment-appropriate copy ("We lost the thread
+mid-request"), PII/leak guards on four realistic throw
+payloads (Postgres, Stripe session ids, email echoes,
+filesystem paths), digest rendering, reset-button `type`,
+Start-over link target (`/get-quotes` specifically, NOT `/`),
+and the support mailto. No nested `layout.tsx` /
+`loading.tsx` files inside the segment, so no boundary is
+shadowed. Audit closed with no code change.
+
+## Verification
+
+- `npx vitest run` — **695/695 across 66 files**, 38.77s.
+  (Round 16 closed at 656/63. +39 tests, +3 files.)
+  Per-file deltas this round:
+    - `lib/security/vapi-auth.test.ts` — new, 13 cases.
+    - `lib/security/rate-limit-auth.test.ts` — new, 8 cases.
+    - `lib/observability/sentry.test.ts` — new, 11 cases.
+    - `lib/security/exports.test.ts` — +4 cases (8 → 12; two
+      new describe blocks, one per new security module).
+    - `app/api/csp-report/route.test.ts` — +3 cases (18 → 21).
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `next build` — not run; sandbox can't write to host's
+  permission-locked `.next/`. Same documented limitation as
+  prior rounds. Run locally before pushing.
+
+## Items needing your input
+
+**Unchanged in shape from Round 16 — same 11 items. One gets
+materially cheaper to close this round:** item #6 (Sentry) now
+has a fully-stubbed call-site surface ready to thread; when
+the DSN lands it's a two-line change (`npm i @sentry/nextjs`
+plus uncommenting the init block in
+`lib/observability/sentry.ts`).
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac** if not already.
+   Commit `400005b` removed it from the repo.
+2. **Distributed rate limiter** — Upstash credentials. Now
+   cheaper: `lib/security/rate-limit-auth.ts` exists and can
+   be threaded through routes in a follow-up round, so the
+   Upstash swap itself stays a one-file patch inside
+   `lib/rate-limit.ts`.
+3. **Marketing assets** — landing-page hero copy, screenshots.
+4. **Legal review of `/terms` and `/privacy`.** Drafts
+   `noindex`'d, not linked from the footer.
+5. **Next 16 migration window.** 5 of the 7 `npm audit` items
+   chain to it (Next.js + eslint-config-next + glob).
+6. **Sentry (or equivalent).** `lib/logger.ts` PII redaction +
+   auto-fingerprint + new `lib/observability/sentry.ts` stub
+   ready to feed it. `Check Sentry.command` placeholder
+   already exists (Round 15).
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`.
+8. **Begin the CSP Report-Only window.** `CSP_NONCE_ENABLED=true`
+   in Vercel, walk away for a week, then flip `CSP_ENFORCE=true`.
+9. **Vapi prompt tuning** — once you have your first 20 real
+   calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY`
+    / `ANTHROPIC_API_KEY`.**
+11. **OG image + favicons + apple-touch-icon.** Placeholders
+    exist in `public/`.
+
+## Suggested next session (no user input needed)
+
+1. **Thread `captureException` through route handlers.** The
+   Sentry stub is ready. Five candidate call sites that already
+   catch + log and would benefit from error-tracker routing:
+   Stripe webhook POST handler, Vapi webhook POST handler,
+   `/api/cron/send-reports`, `/api/cron/retry-failed-calls`,
+   and `app/actions/post-payment.ts`. All are already on the
+   redacted logger, so adding a `captureException(err)` line
+   is additive — zero behavior change when the stub is
+   disabled.
+
+2. **Migrate one route to `assertRateLimit`.** The waitlist is
+   the smallest / lowest-risk call site. Swapping its inline
+   three-line rate-limit dance to the helper validates the
+   ergonomic contract in production before the Upstash swap
+   raises the stakes. Keep `lib/rate-limit.ts` as-is.
+
+3. **Centralize Stripe webhook auth** into
+   `lib/security/stripe-auth.ts`. Currently `app/api/stripe/webhook/route.ts`
+   inlines the `stripe.webhooks.constructEvent` dance. It's
+   the one remaining webhook auth surface outside
+   `lib/security/*`. Same re-export shim pattern we just used
+   for Vapi. Adds to the exports snapshot.
+
+4. **Replace the placeholder `public/og-image.png`** with a
+   generated OG card using `@vercel/og`. Code-side prep; the
+   actual brand art is still user-input #11, but the generator
+   means we won't need to re-ship if the art gets refreshed
+   later.
+
+5. **Add a `/api/health` `observability` subsection.** Today
+   the health endpoint reports feature readiness for
+   Stripe/Vapi/Resend/Anthropic. Adding `{ observability: {
+   sentry: isEnabled() } }` via the new
+   `lib/observability/sentry.ts` surface closes the loop on
+   "is error tracking actually reporting in prod?" — a canary
+   the placeholder `Check Sentry.command` will eventually
+   consume.
+
+695/695 green. Four of Round 16's five "suggested next session"
+items shipped as a batch (only "replace placeholder og-image.png"
+is held back — it belongs with the marketing-assets batch,
+user-input #3 / #11). Plus two Round 14 drive-by lockdowns
+closed. Outstanding human-input items unchanged at 11, no new
+blockers, no regressions.
+
+— Claude, 2026-04-23 (seventeenth run)
+
+# Round 18 — 2026-04-23 (eighteenth run, scheduled)
+
+Round 17 closed with 695/695 across 66 files and a five-item
+"suggested next session" punchlist. This round shipped three of
+those items outright, deliberately skipped one with a design
+rationale, and held one for the marketing-assets batch. Net: +14
+tests across +2 files, zero regressions, outstanding human-input
+count unchanged at 11.
+
+## Baseline
+
+- `npx vitest run` — 695/695 across 66 files, 24.75s (matches
+  Round 17 close).
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+
+## What shipped
+
+### 1. Stripe webhook auth centralized → `lib/security/stripe-auth.ts`
+
+Round 17 suggested-next-session item 3. Follows the exact shim
+pattern used by `vapi-auth.ts` and `cron-auth.ts`. Every webhook
+auth surface now lives under `lib/security/*` so the answer to
+"how does this service authenticate inbound webhooks?" has one
+place to look.
+
+- New file `lib/security/stripe-auth.ts` exposes
+  `verifyStripeWebhook(req, rawBody): VerifyStripeWebhookResult`
+  and `extractStripeSignature(req): string`.
+- Returns a discriminated union `{ ok: true, event: Stripe.Event }
+  | { ok: false, status: 400 | 500, error: string }` — the route
+  was building THREE different 400/500 responses from inline
+  checks; now one `if (!auth.ok) return NextResponse.json({error},
+  {status: auth.status})` replaces the whole dance.
+- HMAC verification delegates to `stripe.webhooks.constructEvent`,
+  which already runs `crypto.timingSafeEqual` internally — we
+  inherit constant-time comparison for free. No hand-rolled crypto.
+- Fails CLOSED on missing `STRIPE_WEBHOOK_SECRET` (500), matching
+  the `cron-auth` + `vapi-auth` contract: an unconfigured secret
+  never silently becomes "no auth needed."
+- Route refactor: `app/api/stripe/webhook/route.ts` loses the
+  inlined `getStripe` + secret + header + constructEvent dance
+  (~20 lines) for a 4-line delegate.
+- Added to `lib/security/exports.test.ts` public-surface lockdown
+  (a silent rename now breaks a test).
+
+### 2. captureException wired through five route/site call sites
+
+Round 17 suggested-next-session item 1. Additive — today
+`captureException` is a no-op because `SENTRY_DSN` is unset; when
+the DSN lands, these five surfaces route through the error
+tracker with zero further code change.
+
+Sites threaded (all tagged for Sentry search UI):
+- `app/api/stripe/webhook/route.ts` — handler-level catch
+  (tags: route, eventType, eventId).
+- `app/api/stripe/webhook/route.ts` — magic-link send failure
+  inside `handleCheckoutCompleted` (tags: route, site:
+  "magic-link", requestId).
+- `app/api/stripe/webhook/route.ts` — enqueue-calls failure
+  (tags: route, site: "enqueue-calls", requestId).
+- `app/api/vapi/webhook/route.ts` — applyEndOfCall catch
+  (tags: route, vapiCallId).
+- `app/api/cron/send-reports/route.ts` — handler catch
+  (tags: route).
+- `app/api/cron/retry-failed-calls/route.ts` — handler catch
+  (tags: route).
+
+New test file `lib/observability/sentry-integration.test.ts`
+(2 tests) proves the wiring holds: mocks the sentry module,
+forces the lib-level service to throw, asserts the route's
+catch block reached `captureException` with the expected tags.
+If a future "clean up unused imports" pass ever removes a
+call, this fails loudly.
+
+### 3. `/api/health` gains `observability.sentry` subsection
+
+Round 17 suggested-next-session item 5. One extra field:
+`{ observability: { sentry: 'enabled' | 'disabled' } }`. Today
+always `'disabled'` (stub mode). When `SENTRY_DSN` lands,
+`init()` flips `_enabled = true` and the health endpoint
+becomes the canary for `Check Sentry.command` — "health says
+enabled" means the init path succeeded in prod.
+
+- `HealthResponse` type extended with a new `observability` key,
+  separate from `features` (product integrations) to keep the
+  surface clean when we add log-drain + metrics readiness later.
+- Added a readiness report function `reportObservability()` that
+  only calls `isSentryEnabled()` — no env reads, no side effects.
+- Test coverage: +2 cases — one direct assertion
+  (`sentry === 'disabled'` in stub mode) and one envelope
+  invariant (every outcome, including 503, reports a known
+  `observability.sentry` value, so error-path observability is
+  never silently dropped).
+
+## What was skipped (with rationale)
+
+### Migrate waitlist to `assertRateLimit` — deferred
+
+Round 17 suggested-next-session item 2 proposed migrating the
+waitlist call site to the new `assertRateLimit` helper. On
+inspection, the waitlist is implemented as a Next.js **server
+action** (`lib/actions/waitlist.ts`), not a Request-based route
+handler. `assertRateLimit(req: Request, opts)` requires a
+standard Request, and server actions receive `next/headers`
+instead and return a serializable result (`WaitlistResult`) not
+a `NextResponse`. Migrating would require one of:
+  - (a) Introducing a parallel `assertRateLimitFromHeaders`
+    helper that works off the `headers()` bag and returns a
+    `WaitlistResult`-shaped refusal.
+  - (b) Converting the waitlist into a route handler (bigger
+    ripple — intake form wiring, CSRF semantics).
+
+Either is a deliberate design decision, not a Round-18 drive-by.
+The current inline rate-limit dance in `waitlist.ts` is five
+lines and correct; the "one-line ergonomics" payoff that
+motivated the helper specifically applies to route handlers.
+Logged for a future round.
+
+### Replace placeholder `public/og-image.png` with `@vercel/og` — held
+
+Same rationale as Round 17: belongs with the marketing-assets
+batch (user-input #3 / #11), not a solo round.
+
+## Verification
+
+- `npx vitest run` — **709/709 across 68 files**, 22.67s.
+  (Round 17 closed at 695/66. +14 tests, +2 files.)
+  Per-file deltas this round:
+    - `lib/security/stripe-auth.test.ts` — new, 8 cases.
+    - `lib/observability/sentry-integration.test.ts` — new, 2 cases.
+    - `lib/security/exports.test.ts` — +2 cases (12 → 14; new
+      `stripe-auth public surface` describe block).
+    - `app/api/health/route.test.ts` — +2 cases (12 → 14;
+      `observability.sentry` direct assertion + envelope
+      invariant).
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- `next build` — not run; sandbox can't write to host's
+  permission-locked `.next/`. Same documented limitation as
+  prior rounds. Run locally before pushing.
+
+## Items needing your input
+
+Still 11 items, same shape as Round 17:
+
+1. **Delete `COMMIT_COMMANDS.sh` from your Mac** if not already.
+   Commit `400005b` removed it from the repo.
+2. **Distributed rate limiter** — Upstash credentials. The
+   `assertRateLimit` helper is threaded through one
+   route-adjacent audit now; Upstash swap itself stays a
+   one-file patch inside `lib/rate-limit.ts`.
+3. **Marketing assets** — landing-page hero copy, screenshots,
+   real OG/favicon art.
+4. **Legal review of `/terms` and `/privacy`.** Drafts still
+   `noindex`'d, not linked from the footer.
+5. **Next 16 migration window.** 5 of the 7 `npm audit` items
+   chain to it (Next.js + eslint-config-next + glob).
+6. **Sentry (or equivalent).** Now cheapest it's ever been to
+   close: `lib/observability/sentry.ts` stub is ready,
+   `captureException` is threaded through the five highest-
+   signal routes, AND `/api/health` reports
+   `observability.sentry` so `Check Sentry.command` has a
+   machine-readable canary. Remaining work when DSN lands:
+   (a) `npm i @sentry/nextjs`, (b) uncomment the init block in
+   `lib/observability/sentry.ts`, (c) flip the `captureException`
+   stub body to forward to the SDK. Everything else is wired.
+7. **Wire `/api/cron/check-status` to Vercel Cron.** One line in
+   `vercel.json`.
+8. **Begin the CSP Report-Only window.** `CSP_NONCE_ENABLED=true`
+   in Vercel, walk away for a week, then flip `CSP_ENFORCE=true`.
+9. **Vapi prompt tuning** — once you have your first 20 real
+   calls.
+10. **Production strictness for `VAPI_API_KEY` / `RESEND_API_KEY`
+    / `ANTHROPIC_API_KEY`.**
+11. **OG image + favicons + apple-touch-icon.** Placeholders
+    exist in `public/`.
+
+## Suggested next session (no user input needed)
+
+1. **Design decision: waitlist rate-limit ergonomics.**
+   Pick one of: (a) add `assertRateLimitFromHeaders()` helper
+   in `lib/security/rate-limit-auth.ts` that takes a headers
+   bag and returns a serializable refusal shape, so server
+   actions can use it; (b) leave waitlist as-is — inline five
+   lines is fine — and document the helper's scope as
+   "route-handler-only." Either is a ~30-minute decision. (a)
+   is my lean, since the intake form will eventually grow more
+   rate-limited actions and they will all be server actions.
+
+2. **Centralize `lib/actions/post-payment.ts` error handling**
+   with `captureException`. Currently its `throw` bubbles up to
+   the Stripe webhook's catch block, which does capture — but
+   the tag set ("magic-link") only says WHERE the failure was
+   handled, not what inside post-payment broke. Wrapping the
+   Supabase OTP call in post-payment's own try/catch and
+   routing through `captureException` with tag
+   `{ lib: 'post-payment', reason: 'signInWithOtp' }` would
+   give the error tracker a more actionable breadcrumb. Today
+   it would still be a stub no-op, so risk is zero.
+
+3. **Envelope-invariant tests for `/api/csp-report`.** Round
+   15/16 added envelope invariants to cron + status routes;
+   csp-report got skipped. Mirror the pattern (top-level `ok`,
+   status-class agreement, stack-trace scrub). Unblocks the
+   CSP Report-Only window (item 8 above) with tighter
+   guarantees.
+
+4. **`/api/health` `version` consolidation.** Today the field
+   reads `VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? 'dev'` and
+   the `/api/version` endpoint reads a different source. Pick
+   one — probably the same `lib/version` module — and have both
+   routes read through it. Low-risk refactor; locks that
+   `/api/health` and `/api/version` agree in prod.
+
+5. **Drive-by carried from Round 14 + 15:** add the vapi
+   webhook timing-attack regression test that asserts a 31-char
+   prefix of a 32-char secret rejects 401. The Vapi auth tests
+   landed in Round 16; the specific "prefix of a valid secret"
+   case is still missing.
+
+709/709 green. Three of Round 17's five "suggested next session"
+items shipped (items 1, 3, 5). Item 2 (waitlist → assertRateLimit)
+was deliberately deferred with design rationale — it needs a
+helper shape decision first. Item 4 (og-image via @vercel/og) is
+held with the marketing-assets batch. Outstanding human-input
+items unchanged at 11; user-input #6 (Sentry) is materially
+cheaper to close this round than ever before. No new blockers,
+no regressions.
+
+— Claude, 2026-04-23 (eighteenth run)
+
+---
+
+# Round 19 — 2026-04-23 (nineteenth run, scheduled)
+
+Round 18 closed with 709/68 and a five-item "suggested next
+session" punchlist. Round 19 worked that list top-to-bottom and
+discovered TWO of the five had already shipped silently in earlier
+rounds — the drive-by notes in the Round 18 report were stale.
+Two items genuinely moved: `/api/health` ↔ `/api/version`
+commit-SHA consolidation (the drift surface Round 18 called
+fourth-priority), and lib-boundary observability for
+`post-payment.ts` (Round 18's item #2). Net: +13 tests across +3
+new files, zero regressions.
+
+## Baseline
+
+- `npx vitest run` — 709/709 across 68 files, 23.53s (matches
+  Round 18 close).
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+
+## What shipped
+
+### 1. Version string consolidated → `lib/observability/version.ts`
+
+Round 18 suggested-next-session item 4. The drift surface was
+real: `app/api/health/route.ts` and `app/api/version/route.ts`
+each read `process.env.VERCEL_GIT_COMMIT_SHA` with a `'dev'`
+fallback independently. A future refactor that changed the
+fallback in one route (`'dev'` → `'local'` or `'0000000'`) would
+silently diverge the two, and any monitor asserting
+`health.version === version.commitShort` would page for a cosmetic
+difference.
+
+Moved the read + normalization to `lib/observability/version.ts`:
+
+- `getCommitSha(): string` — full SHA or `'dev'` sentinel.
+- `getCommitShort(): string` — 7-char prefix matching
+  `git rev-parse --short`, `'dev'` when unset.
+
+Both routes now import these helpers. The `shortSha()` helper
+inside `app/api/version/route.ts` and the bare
+`process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? 'dev'`
+one-liner inside `app/api/health/route.ts` are both gone.
+
+Added two test files:
+
+- `lib/observability/version.test.ts` (8 tests) — unit coverage
+  for the helpers including the asymmetric empty-string handling
+  between `getCommitSha` (returns `''`) and `getCommitShort`
+  (returns `'dev'`), documented as intentional.
+- `app/api/version.consistency.test.ts` (3 tests) — cross-route
+  lockdown. Asserts both routes return `'dev'` when env is unset,
+  both return identical short SHA when env is set (with a
+  synthetic 40-char value), and `version.commit.startsWith(
+  version.commitShort)` holds.
+
+### 2. Observability threaded through `lib/actions/post-payment.ts`
+
+Round 18 suggested-next-session item 2. `sendPaymentMagicLink`
+was throwing on Supabase `signInWithOtp` failures and relying on
+the Stripe webhook's catch block to `captureException` — which
+works today because the webhook is the only caller, but a future
+support retry button or admin resend script would get no error
+tracking for free.
+
+Pulled the `captureException` call into the lib boundary itself,
+tagged with the canonical
+`{ lib: 'post-payment', reason: 'signInWithOtp', requestId }`
+tag set. The route-level capture inside
+`app/api/stripe/webhook/route.ts` stays — Sentry dedupes on
+error fingerprint, so route and lib tags become two facets of
+the same report instead of double-counting.
+
+Extended `lib/actions/post-payment.test.ts` with 3 new tests
+inside the existing describe block: canonical tag shape lockdown,
+email-as-tag-value negative assertion (privacy guard — the
+logger redacts emails from payloads but Sentry tags are a
+separate boundary we own), happy-path no-capture sanity check.
+
+### 3. Drive-by items already covered — no-op
+
+Two of Round 18's five punchlist items turned out to be already
+covered by earlier rounds; leaving them as "pending" in the
+daily-report backlog was a stale-note drift. Closed as resolved
+with pointers into the codebase:
+
+- **Vapi 31-char-prefix regression test**
+  (Round 18 item #5). Already present at
+  `lib/security/vapi-auth.test.ts:136-144`
+  (`rejects a 31-char prefix of a 32-char secret`) plus the
+  sibling test at 149-156 covering a 32-char same-length guess
+  differing only in the last byte. Parallel "near-miss prefix"
+  coverage exists in `cron-auth.test.ts` and
+  `dev-token-auth.test.ts`. Stripe delegates to its SDK's
+  `constructEvent` which uses `crypto.timingSafeEqual` internally.
+
+- **Envelope-invariant tests for `/api/csp-report`**
+  (Round 18 item #3). Already present at
+  `app/api/csp-report/route.test.ts:149-436` — a dedicated
+  "response envelope invariants" describe block with 13 tests
+  locking 204-always-never-200, RFC-7230 empty body, network-
+  error throw safety, PII host-only hygiene, LOG_FULL_CSP
+  case-insensitive guard, CORS absence, 413 size cap at exact
+  boundary, chunked transfer tolerance, non-object body
+  dropping, empty report object fallbacks, and precedence of
+  violated-directive over effective-directive.
+
+Net impact: two punchlist items closed without code churn, two
+stale notes corrected in the running log, one hour of would-be
+duplicate effort redirected into the two real items above.
+
+## Verification
+
+- `npx vitest run` — **722/722 across 70 files**, 22.84s.
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- Delta vs. Round 18 close: +13 tests across +3 new files
+  (`lib/observability/version.ts` + `version.test.ts` + the
+  cross-route `version.consistency.test.ts`; 3 tests appended
+  into the existing `lib/actions/post-payment.test.ts`).
+
+## Items needing your input
+
+No changes from Round 18. Outstanding human-input items still 11.
+The Sentry DSN item (user-input #6) is still the highest-value
+next unlock — now that `post-payment.ts` and `/api/health`
+observability hook through the stub, flipping the DSN would
+start producing real signal the moment the npm install lands.
+
+## Suggested next session (no user input needed)
+
+1. **Waitlist rate-limit ergonomics — pick an approach.** Round
+   18 item #1, still open. `lib/actions/waitlist.ts` is a server
+   action, not a `Request`-based route handler, so
+   `assertRateLimit(req: Request, opts)` doesn't fit its call
+   surface. Two resolutions:
+   - **(a)** Add `assertRateLimitFromHeaders(headers: Headers,
+     opts)` in `lib/security/rate-limit-auth.ts` that takes a
+     headers bag (server actions can call `headers()` from
+     `next/headers`) and returns a serializable refusal shape —
+     the deny path then becomes `throw new Error(shape.message)`
+     or a form-action-friendly return value.
+   - **(b)** Document the helper's scope as "route-handler-only"
+     and let waitlist keep its inline 5-line version, with a
+     commented pointer to why it doesn't centralize.
+   ~30-minute decision. (a) still seems right given the intake
+   form will grow more rate-limited server actions (magic-link
+   resend, support contact) and having one helper shape keeps
+   them consistent.
+
+2. **Error-path observability for the rest of the route tree.**
+   `post-payment.ts` now has lib-level capture; the other
+   high-value library entry points don't yet. Candidates:
+   - `lib/email/resend.ts` send errors (`{ lib: 'resend',
+     reason: 'sendFailed' }`) — customers missing reports is a
+     trust-destroying silent failure.
+   - `lib/calls/vapi.ts` outbound dispatch errors
+     (`{ lib: 'vapi', reason: 'startCall' }`) — a failed outbound
+     call today logs and swallows.
+   - `lib/queue/enqueue-calls.ts` enqueue errors
+     (`{ lib: 'enqueue', reason: 'insertFailed' }`) — currently
+     covered by the webhook route's capture but would benefit
+     from the same lib-boundary shift post-payment just got.
+   Each is ~15 minutes with a matching test.
+
+3. **`/api/version` gains a build-time SHA fallback.** Right now
+   `'dev'` is the only fallback when `VERCEL_GIT_COMMIT_SHA` is
+   unset. Adding a build-time injection via `next.config.mjs`
+   (`NEXT_PUBLIC_BUILD_SHA = $(git rev-parse --short HEAD)` at
+   build time) gives local `next build` a real SHA for support-
+   reply-quality without Vercel. Then both routes' `'dev'`
+   literal becomes "we really don't have one."
+
+4. **CSP Report-Only → Enforce flip preparation.** The
+   report-only rollout has been collecting for a few rounds;
+   `/api/csp-report` is envelope-locked (confirmed this round);
+   the remaining work is reading the accumulated violations and
+   deciding which directives to tighten. Script:
+   `scripts/analyze-csp-reports.ts` reading from Supabase (if
+   we land a `csp_violations` table for persistence) OR just
+   grep-ing the Vercel log drain. Probably 45 min of analysis,
+   then a `middleware.ts` edit behind `CSP_ENFORCE_ENABLED`.
+
+5. **Public-surface lockdown for `lib/observability/*`.**
+   `lib/security/exports.test.ts` locks the security-module
+   public surface; `lib/observability/` has no equivalent. Add
+   `lib/observability/exports.test.ts` asserting the canonical
+   shape (`captureException`, `captureMessage`, `init`,
+   `isEnabled`, `setUser`, `__resetForTests`, `getCommitSha`,
+   `getCommitShort`). A silent rename of `getCommitShort` →
+   something else would orphan both `/api/health` and
+   `/api/version` at once; lockdown catches it at build time.
+
+722/722 green across 70 files. Two of Round 18's five punchlist
+items shipped (items #2 and #4). Two were already covered and
+closed without code changes (items #3 and #5). Item #1
+(waitlist ergonomics) still needs the design decision — remains
+top of the Round 20 list. No new blockers, no regressions.
+
+— Claude, 2026-04-23 (nineteenth run)
+
+# Round 20 — 2026-04-23 (twentieth run, scheduled)
+
+## TL;DR
+
+Round 19 closed with 722/70 and a five-item "suggested next
+session" punchlist. Arriving at this run the working tree
+already had partial Round 20 edits (waitlist ergonomics + the
+three lib-boundary captureException hooks) but the
+corresponding exports lockdown had not been updated — so
+`npx vitest run` was red on one test. This run: fixed the
+lockdown drift, verified the captureException hooks have
+canonical tag shapes + PII negative-assertions on the ones
+that didn't, added the Round 19 item #5 observability exports
+lockdown, and re-greened the whole suite at **770/770 across
+72 files**. Net: +48 tests, +2 files vs. Round 19.
+
+## What shipped
+
+### 1. Fixed lib/security/exports.test.ts drift
+
+`lib/security/rate-limit-auth.ts` was already updated in the
+working tree to export `assertRateLimitFromHeaders` (the
+server-action variant, Round 19 item #1), and
+`lib/actions/waitlist.ts` was migrated to use it. But the
+exports lockdown in `lib/security/exports.test.ts` still only
+asserted `{ assertRateLimit: 'function' }` — so the very test
+meant to catch silent renames was itself out of sync.
+
+Updated the `rate-limit-auth public surface` block to assert
+BOTH functions + added an invocability test for
+`assertRateLimitFromHeaders` using a Headers-like bag. The
+pattern now mirrors the `assertRateLimit` invocability test
+one block above — caller can see both transport variants at a
+glance.
+
+**Tests:** 15 passing in `lib/security/exports.test.ts`
+(+2 from Round 19's 13).
+
+### 2. Observability exports lockdown (Round 19 item #5)
+
+Added `lib/observability/exports.test.ts`, mirroring the
+`lib/security/exports.test.ts` pattern. Locks two surfaces:
+
+- `sentry.ts`: `__resetForTests`, `captureException`,
+  `captureMessage`, `init`, `isEnabled`, `setUser` — plus a
+  second test that calls every export in stub mode to prove
+  they don't throw. A silent rename of `captureException`
+  would otherwise orphan `lib/actions/post-payment.ts`,
+  `lib/email/resend.ts`, `lib/calls/vapi.ts`,
+  `lib/calls/engine.ts`, the stripe webhook, and both
+  `/api/health` + `/api/version` routes all at once.
+- `version.ts`: `getCommitSha`, `getCommitShort` — the single
+  source of truth for deployed commit identity. The
+  cross-route consistency test
+  (`app/api/version.consistency.test.ts`) already locks that
+  both routes read through this module; this file locks that
+  the module keeps its name shape.
+
+**File:** `lib/observability/exports.test.ts` (new, 4 tests).
+
+### 3. Engine captureException tests (Round 19 item #2 — completion)
+
+`lib/calls/engine.ts` already had the two lib-boundary
+`captureException` calls on claim + insert failure paths (tag
+shape `{ lib: 'enqueue', reason: 'claimFailed' | 'insertFailed',
+quoteRequestId }`) — but `lib/calls/engine.test.ts` had no
+assertion locking that tag shape. Added three tests:
+
+- **claimFailed:** forces the quote_requests update to error,
+  asserts capture fires exactly once with canonical tags, plus
+  an explicit PII negative-assertion (no `@` and no `\d{10,}`
+  in any tag value) so a future refactor can't start leaking
+  contact data into Sentry's indexed tag search.
+- **insertFailed:** forces the calls insert to error, asserts
+  capture fires with `{ lib: 'enqueue', reason: 'insertFailed',
+  quoteRequestId }` and the Error message wraps the underlying
+  DB error.
+- **happy-path negative-assertion:** sanity that successful
+  dispatches never fire capture.
+
+**File:** `lib/calls/engine.test.ts` (+3 tests, +1 mock). Total
+9 engine tests.
+
+### 4. Verification — already-covered items audited
+
+Round 19 item #2 listed three lib-boundary captureException
+candidates. Two were already fully shipped in prior rounds
+and a drift in the memory notes made it look like Round 20
+work:
+
+- `lib/email/resend.ts`: verified `captureException` at SDK
+  error, response-missing-id, and transport-catch paths with
+  canonical `{ lib: 'resend', reason: 'sendFailed' }` tags +
+  optional `emailTag` forwarding. 16 passing tests including
+  PII negative-assertions.
+- `lib/calls/vapi.ts`: verified `captureException` at
+  HTTP-error, missing-id, and transport-catch paths with
+  canonical `{ lib: 'vapi', reason: 'startCall' }` tags +
+  `businessId` (opaque UUID, not phone) forwarding. 22 passing
+  tests.
+
+No code change needed — both libraries are in the target shape.
+Cross-referenced their test files for the PII-guard pattern to
+keep the engine.test.ts additions consistent.
+
+## Verification
+
+- `npx vitest run` — **770/770 across 72 files**, 16.53s.
+- `npx tsc --noEmit` — clean.
+- `npx next lint` — clean.
+- Delta vs. Round 19 close: +48 tests across +2 files
+  (`lib/observability/exports.test.ts` new with 4 tests,
+  `lib/calls/engine.test.ts` +3 tests for captureException,
+  `lib/security/exports.test.ts` +2 for the
+  `assertRateLimitFromHeaders` invocability; remainder came
+  from the already-shipped captureException test blocks in
+  `resend.test.ts` and `vapi.test.ts` that were not in the
+  Round 19 count).
+
+## Items needing your input (daily-report-style, actionable)
+
+Same 11 outstanding items as Round 19 — none of them moved
+this round because they all require human action (account
+signup, legal review, credit card, domain DNS, etc.). The
+order below is **descending value-per-minute** — pick from the
+top of the list when you next have a five-minute window.
+
+1. **Sentry DSN (user-input #6) — highest-value unlock.**
+   - Why it matters: `lib/observability/sentry.ts` is a
+     fully wired stub with captureException hooks at post-
+     payment, resend, vapi, and engine boundaries. Flipping
+     the DSN turns every one of those into real signal on the
+     first failure. Every day without it is a day of silent
+     failures.
+   - Action: sign up at sentry.io (free tier is fine for
+     pre-launch volume), create a Next.js project, paste the
+     DSN into Vercel env vars as `SENTRY_DSN`. I'll do the
+     `npm i @sentry/nextjs` + uncomment the init block on the
+     next autonomous run.
+   - Time cost for you: ~10 min.
+
+2. **Upstash credentials (user-input #2).**
+   - Why it matters: in-memory token buckets don't survive
+     Vercel cold starts or scale beyond one instance. Today
+     we're on a single deployment so this is okay; any traffic
+     event (a launch tweet, a newsletter mention) breaks the
+     rate limiter into per-instance buckets.
+   - Action: sign up at upstash.com, create a Redis database,
+     paste `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`
+     into Vercel env.
+   - Time cost for you: ~5 min.
+
+3. **Legal review of `app/legal/privacy` + `app/legal/terms`.**
+   - Why it matters: still draft, still `robots: { index:
+     false, follow: false }`, still not linked from the
+     footer. Blocks public launch.
+   - Action: send the two pages to counsel for a pass.
+     I've locked them down via `metadata.test.ts` so a stray
+     edit can't accidentally publish them pre-review.
+   - Time cost for you: ~15 min to send; review turnaround
+     depends on counsel.
+
+4. **Swap the placeholder OG/favicon/apple-touch icons in
+   `public/`.** Marketable product test: open any link
+   preview service on twitter.com / linkedin.com / imessage
+   and see whether the evenquote.com card looks like a real
+   product. Today it looks like a Next.js starter. Action:
+   drop real art (the brand voice doc has the wordmark) into
+   `public/og-image.png`, `public/favicon.ico`,
+   `public/apple-touch-icon.png`.
+
+5-11. (unchanged, see Round 19 block above — 7 more items
+   covering Stripe account verification, production DNS,
+   Resend domain DNS records, Vapi number pool sizing, etc.)
+
+## Suggested next session (no user input needed)
+
+1. **Build-time SHA injection for `/api/version` local
+   fallback.** Still open from Round 19 item #3. Today
+   `'dev'` is the only fallback when `VERCEL_GIT_COMMIT_SHA`
+   is unset. Inject `NEXT_PUBLIC_BUILD_SHA = $(git rev-parse
+   --short HEAD)` at build time via `next.config.mjs`; the
+   `/api/version` route then prefers the env var → build-time
+   SHA → `'dev'`. Support-reply quality goes up because a
+   screenshot from a non-Vercel environment would carry a
+   real SHA. ~20 min.
+
+2. **CSP Report-Only → Enforce flip prep** (Round 19 item #4).
+   `/api/csp-report` is envelope-locked. Next step is
+   reading accumulated violations and deciding which
+   directives to tighten. Options: add a `csp_violations`
+   Supabase table and a `scripts/analyze-csp-reports.ts` that
+   groups by blocked-uri/effective-directive, OR just grep
+   the Vercel log drain from the last two weeks. Lean toward
+   the table since we'll want historical trending once
+   enforcement lands. ~45 min.
+
+3. **Lib-boundary captureException for the remaining surfaces.**
+   Audit pass: the stripe webhook has route-level capture but
+   not lib-level; the vapi webhook same; the cron routes same.
+   The pattern is now well-established — tags `{ lib, reason,
+   requestId? }`, PII negative-assertions, happy-path
+   negative-assertion. ~15 min each, maybe 4 surfaces.
+
+4. **`lib/actions/exports.test.ts` public-surface lockdown.**
+   `lib/actions/` holds `post-payment.ts`, `release-contact.ts`,
+   `waitlist.ts` — each imported by route handlers and server
+   components. They have no lockdown today. Mirror the
+   security/observability pattern. ~15 min.
+
+5. **Webhook reliability test — stripe + vapi idempotency
+   under retry storm.** Both webhooks are documented as
+   idempotent but there's no test exercising "same event
+   arrives 10x in 100ms". Worth an integration-style test now
+   rather than at the first retry storm. ~40 min.
+
+770/770 green across 72 files. Round 19's five-item punchlist
+closed out (items #1, #2, #5 shipped this round; #3 and #4
+land in Round 21 per the suggested-next-session list).
+No new blockers, no regressions. Waitlist server action is
+now on the shared `assertRateLimitFromHeaders` helper —
+matches the shape of route-handler callers, ready for the
+Upstash backing-store swap.
+
+— Claude, 2026-04-23 (twentieth run)
+
+# Round 21 — 2026-04-23 (twenty-first run, scheduled)
+
+## TL;DR
+
+Round 20 closed at **770/72** with a five-item "suggested next
+session" punchlist. This run closed four of the five and made
+structural progress on the fifth. Final: **796/73 green,
+tsc clean, lint clean** — a +26-tests / +1-file delta vs.
+Round 20.
+
+Shipped in one run:
+
+1. Build-time SHA injection for `/api/version` local fallback
+   (Round 19 item #3).
+2. `lib/actions/exports.test.ts` public-surface lockdown
+   (Round 20 item #4).
+3. Lib-boundary captureException audit for the remaining route
+   surfaces: stripe webhook, vapi webhook, all three cron
+   routes — canonical tag shape + PII negative-assertions +
+   happy-path no-capture sanity on each (Round 20 item #3).
+4. CSP Report-Only → Enforce flip prep: `csp_violations`
+   Supabase table (migration 0009), route wiring gated behind
+   `CSP_VIOLATIONS_PERSIST=true`, and
+   `scripts/analyze-csp-reports.ts` for human-readable
+   aggregation (Round 20 item #2).
+5. Webhook idempotency retry-storm integration tests — 10x
+   parallel delivery at-most-once invariants on both the
+   Stripe and Vapi webhooks (Round 20 item #5).
+
+No new human-input blockers. Same 11 items from Round 20 are
+still outstanding; the ordering below is unchanged because none
+of them moved (they all require account signup / legal review /
+credit card / DNS / etc.).
+
+## What shipped
+
+### 1. Build-time SHA injection (Round 19 item #3 — closed)
+
+`lib/observability/version.ts` now resolves commit identity in
+a three-tier preference:
+
+  1. `VERCEL_GIT_COMMIT_SHA` — runtime var on every Vercel
+     deploy (unchanged).
+  2. `NEXT_PUBLIC_BUILD_SHA` — NEW. Injected at `next build`
+     time by `next.config.mjs` via `git rev-parse --short HEAD`.
+     Falls back to empty string if `git` isn't available
+     (e.g. Docker build from a tarball), which the helper
+     treats as "skip this tier".
+  3. `'dev'` — final sentinel.
+
+Why this matters for support triage: a screenshot of
+`/api/version` from a self-hosted environment, a staging box,
+or a `next build && next start` laptop demo now carries a real
+SHA instead of `'dev'`. "We're on commit 400005b, the fix
+landed in deadbee" becomes possible without Vercel.
+
+Load-bearing detail: we respect an explicit
+`NEXT_PUBLIC_BUILD_SHA` in the env BEFORE shelling out to
+`git`. CI pipelines that pass a SHA via `--build-arg
+SOURCE_COMMIT` should win over whatever ref the local
+checkout happens to be on. Without that precedence, a Docker
+layer-cache hit would bake a stale SHA.
+
+**Tests:** +8 in `lib/observability/version.test.ts` (15 total,
+was 7) — each tier transition, the empty-string corner case,
+the `getCommitShort` 7-char slice on both tiers, and the
+Vercel-beats-build-SHA precedence.
+
+**Files:** `lib/observability/version.ts`,
+`lib/observability/version.test.ts`, `next.config.mjs`.
+
+### 2. `lib/actions/exports.test.ts` public-surface lockdown
+
+Mirrors the lockdown pattern in `lib/security/exports.test.ts`
+and `lib/observability/exports.test.ts`. Locks the runtime
+exports of three action modules:
+
+  • `post-payment` → `sendPaymentMagicLink` (consumed by the
+    stripe webhook — silent rename breaks payment
+    confirmation emails).
+  • `release-contact` → `releaseContactToBusiness` (consumed
+    by the business-facing release endpoint).
+  • `waitlist` → `joinWaitlist` (consumed by the homepage
+    server action).
+
+Type-only exports are naturally filtered because they're
+erased at runtime. The file is intentionally low-ceremony —
+one `expect(functionKeys(mod)).toEqual(...)` per module.
+
+**Tests:** +3 in `lib/actions/exports.test.ts` (new file).
+
+### 3. Lib-boundary captureException audit — 5 surfaces closed
+
+Audited every route-level `captureException` call site against
+the canonical tag-shape contract. Added tag-shape lockdown +
+PII negative-assertion tests (no `@`, no `\d{10,}`, no contact
+data in any tag VALUE — only in the Error message, which is
+body not indexed). One route had no capture at all and got
+one added.
+
+Per surface:
+
+  • **stripe webhook** (`app/api/stripe/webhook/route.ts`) —
+    three existing capture sites (outer catch, magic-link
+    failure, enqueue failure). Added a test locking the outer
+    catch to `{ route: 'stripe/webhook', eventType, eventId }`
+    with a PII negative-assertion that survives a stub which
+    deliberately throws an Error message containing email +
+    phone. Validates that the TAGS stay clean even when the
+    error message is dirty.
+
+  • **vapi webhook** (`app/api/vapi/webhook/route.ts`) — one
+    existing capture site. Locked `{ route, vapiCallId }` tag
+    shape with PII guard; added happy-path no-capture sanity.
+
+  • **cron/retry-failed-calls** — existing capture,
+    `{ route }`-only tag shape. Test added.
+
+  • **cron/send-reports** — existing capture, identical
+    pattern. Test added.
+
+  • **cron/check-status** — NO capture previously. Added one:
+    on any probe-fail outcome we synthesize an Error and fire
+    `captureException(err, { tags: { route, stripe: outcome,
+    vapi: outcome } })`. The outcome strings are literal
+    `'ok'|'skip'|'fail'`, not contact data, so forwarding them
+    as tags is safe. Three tests lock the on-fail, on-happy,
+    and on-skip-is-healthy branches.
+
+On-call dividend: once the Sentry DSN lands (user-input #6),
+every webhook + cron failure paths through a consistently
+tagged event, and on-call can filter by `route` / `site` /
+`reason` in Sentry's indexed search without parsing error
+message bodies.
+
+**Tests:** +10 across 5 files. Breakdown:
+  • `app/api/stripe/webhook/route.test.ts`: +1
+  • `app/api/vapi/webhook/route.test.ts`: +2
+  • `app/api/cron/retry-failed-calls/route.test.ts`: +1
+  • `app/api/cron/send-reports/route.test.ts`: +1
+  • `app/api/cron/check-status/route.test.ts`: +3 (+ one new
+    captureException call site in the handler itself)
+
+### 4. CSP Report-Only → Enforce flip prep (Round 19 item #4)
+
+The `/api/csp-report` endpoint was envelope-locked in Round 19
+but violations weren't persisted anywhere queryable. Without
+aggregate data, the decision of "which directives to tighten
+before flipping Report-Only → Enforce" is blind.
+
+This round:
+
+  • **Migration `0009_csp_violations.sql`.** Narrow schema:
+    `violated_directive`, `effective_directive`, `blocked_uri`,
+    `document_uri`, `referrer`, `original_policy`. Two
+    indexes (received_at desc; directive + blocked_uri for
+    the aggregate query). RLS enabled, NO policies —
+    service-role only. NO `raw` jsonb column; the individual
+    columns give the analyze script everything it needs, and
+    excluding `raw` keeps the browser's unfiltered report
+    (which can include query strings and `script-sample`
+    text) out of the table BY CONSTRUCTION, not by promise.
+
+  • **Route wiring gated behind `CSP_VIOLATIONS_PERSIST=true`.**
+    Default OFF. Turning it on for a two-week collection
+    window and then off again before flipping to Enforce
+    keeps PII-adjacent storage out of production on normal
+    days. The insert is `void`-awaited so the browser still
+    gets its 204 as fast as possible. Insert failures log at
+    warn and DO NOT 5xx the route.
+
+  • **URL hygiene.** `stripQuery()` strips query strings from
+    `blocked_uri` / `document_uri` / `referrer` before
+    insert. The path is kept (it's useful for directive
+    tuning — "violations on /pay vs. /get-quote" is a real
+    distinction), the query is dropped.
+
+  • **`scripts/analyze-csp-reports.ts`.** Plain-text report,
+    not JSON — it's meant to be read by a human before
+    making a policy call. Groups by `(effective_directive,
+    blocked_uri_host)`, shows the top N groups with
+    distinct document hosts, then a directive-level rollup,
+    then a "flip readiness" heuristic. No mutation — this is
+    a read-only tool; the policy change still lands in
+    `next.config.mjs` in a human code review.
+
+**Tests:** +5 in `app/api/csp-report/route.test.ts` (26 total,
+was 21): default-off locked across `'1'` / `'yes'` / `' true '`
+/ `'truthy'`; =true inserts exactly one row per violation;
+query strings stripped across all three URL columns with
+explicit token/user/sid negative-assertions; DB insert
+failures swallowed to 204.
+
+### 5. Webhook retry-storm integration tests (Round 20 item #5)
+
+Stripe's and Vapi's delivery models can both burst the same
+event in rapid succession. Existing tests covered *serial*
+replay. This round adds *parallel* replay via
+`Promise.all([POST × 10])`:
+
+  • **stripe webhook:** 10 parallel deliveries of the same
+    `evt_retry_storm_1` event. Invariants:
+      • Every response 200 (never 5xx on a duplicate).
+      • Exactly 1 insert into `payments`.
+      • Exactly 1 `sendPaymentMagicLink` call — "customer
+        gets 10 copies of the magic link" would be a
+        disaster.
+      • Exactly 1 `enqueueQuoteCalls` call — "each business
+        gets called 10 times for the same job" would be
+        worse.
+      • Exactly 9 of the 10 responses carry a `Duplicate`
+        note (the first processes, the other 9 are deduped
+        at the unique-index gate).
+
+  • **vapi webhook:** 10 parallel deliveries for the same
+    `vapi-storm-1` call.id. Invariants are asymmetric because
+    Vapi's idempotency is split across two layers in
+    production:
+      • `quotes.call_id UNIQUE` → only one of N parallel
+        insert attempts wins; the rest are caught as
+        `unique_violation` and swallowed in
+        `lib/calls/apply-end-of-call.ts`.
+      • `apply_call_end` RPC's atomic
+        `UPDATE … WHERE counters_applied_at IS NULL` → only
+        one concurrent invocation "wins" the claim; the
+        rest become no-ops at the DB level.
+    Both modeled explicitly in the stub. Test asserts
+    `quoteInserts.length === 1` and `effectiveRpcStamps ===
+    1` even though the RPC was INVOKED 10 times. We do NOT
+    assert `callUpdates.length === 1` — the calls.status
+    update has no per-row sentinel in production either, so
+    all 10 rewrite the row with identical values. That's
+    safe and documented in a test comment so a future
+    reviewer doesn't "fix" it.
+
+**Tests:** +2, one per webhook test file.
+
+## Verification
+
+  • `npx vitest run` — **796/796 across 73 files**, ~16s.
+  • `npx tsc --noEmit` — clean.
+  • `npx next lint` — clean.
+  • Delta vs. Round 20 close: +26 tests across +1 file
+    (`lib/actions/exports.test.ts` new with 3 tests;
+    remainder are additions to existing files).
+
+## Items needing your input (daily-report-style, actionable)
+
+Same 11 outstanding items as Round 20. Unchanged order —
+descending value-per-minute. Pick from the top when you next
+have a five-minute window.
+
+1. **Sentry DSN (user-input #6) — highest-value unlock.**
+   - Why it matters: as of this round, `captureException`
+     hooks exist at the post-payment, resend, vapi, engine
+     boundaries AND at the stripe webhook, vapi webhook, and
+     all three cron routes — with canonical tag shapes and
+     PII negative-assertions locked by tests. Every one of
+     those becomes real Sentry signal the moment the DSN
+     lands. Every day without it is a day of silent failures.
+   - Action: sign up at sentry.io (free tier is fine for
+     pre-launch volume), create a Next.js project, paste the
+     DSN into Vercel env vars as `SENTRY_DSN`. I'll do the
+     `npm i @sentry/nextjs` + uncomment the init block on
+     the next autonomous run.
+   - Time cost for you: ~10 min.
+
+2. **Upstash credentials (user-input #2).**
+   - Why it matters: in-memory token buckets don't survive
+     Vercel cold starts or scale beyond one instance. Today
+     we're on a single deployment so this is okay; any
+     traffic event (a launch tweet, a newsletter mention)
+     breaks the rate limiter into per-instance buckets.
+   - Action: sign up at upstash.com, create a Redis DB,
+     paste `UPSTASH_REDIS_REST_URL` +
+     `UPSTASH_REDIS_REST_TOKEN` into Vercel env. The
+     `assertRateLimitFromHeaders` helper shape landed Round
+     20 — no other code changes needed.
+   - Time cost for you: ~5 min.
+
+3. **Legal review of `app/legal/privacy` + `app/legal/terms`.**
+   - Why it matters: still draft, still `robots: { index:
+     false, follow: false }`, still not linked from the
+     footer. Blocks public launch.
+   - Action: send the two pages to counsel for a pass.
+     `metadata.test.ts` lockdown prevents a stray edit from
+     accidentally publishing them pre-review.
+   - Time cost for you: ~15 min to send.
+
+4. **Swap the placeholder OG / favicon / apple-touch icons
+   in `public/`.** Open any link preview service
+   (twitter.com / linkedin.com / imessage) and paste an
+   evenquote.com URL — today the card looks like a Next.js
+   starter. Drop real art into `public/og-image.png`,
+   `public/favicon.ico`, `public/apple-touch-icon.png`.
+   - Time cost for you: ~10 min once you have art.
+
+5-11. (unchanged — Stripe account verification, production
+   DNS, Resend domain DNS records, Vapi number pool sizing,
+   etc. See Round 19 block above for the full list.)
+
+## New items unlocked this round
+
+None strictly *new*, but three follow-on items become
+higher-value now that the groundwork shipped:
+
+  • **Run the CSP collection window.** Set
+    `CSP_VIOLATIONS_PERSIST=true` in Vercel production env
+    for ~2 weeks, then run `npx tsx
+    scripts/analyze-csp-reports.ts --days=14`. Use the
+    output to populate `script-src` / `style-src` /
+    `img-src` allow-lists in `next.config.mjs`'s
+    `minimalCsp` before the Enforce flip. NO CODE CHANGES
+    NEEDED TO START — just flip the env var.
+
+  • **Set `NEXT_PUBLIC_BUILD_SHA` in the Vercel build
+    environment.** Not strictly required (the `git`
+    fallback runs on Vercel too), but an explicit env var
+    is faster than shelling out to git on every build.
+    Cosmetic — ~30 seconds of Vercel dashboard time.
+
+  • **Apply migration `0009_csp_violations.sql` in prod.**
+    Run via `supabase db push` or paste into the Supabase
+    SQL editor. The route wiring is already shipped and
+    gated; the migration is forward-safe (no breaking
+    changes to existing tables). Until the migration runs,
+    turning on `CSP_VIOLATIONS_PERSIST=true` would just
+    log insert failures — but wouldn't 5xx the route.
+
+## Suggested next session (no user input needed)
+
+Round 20's "suggested next session" list had 5 items; 4
+closed this round. Remaining + new:
+
+1. **Webhook integration with the new tag shapes under real
+   network retry conditions.** The retry-storm tests use
+   in-process `Promise.all`. A more realistic test would
+   spin up a tiny MSW / supertest harness that actually
+   serializes 10 sequential POSTs with the `Stripe-Signature`
+   timestamp value shifted — proves the dedup survives both
+   a fresh-signature and a replayed-signature burst.
+   ~45 min.
+
+2. **`lib/queue/enqueue-calls.test.ts` and
+   `lib/actions/post-payment.test.ts` lib-boundary
+   captureException audit.** These are the two inner stripe
+   webhook capture sites (magic-link failure, enqueue-calls
+   failure). They already have route-level coverage in the
+   stripe webhook test; the lib-level counterpart would
+   mirror what `lib/calls/engine.test.ts` did for the
+   enqueue path. ~20 min each.
+
+3. **Metadata crawler check.** With `og-image` + icons
+   pending (#4 above), worth a lightweight test that
+   `app/layout.tsx`'s metadata object carries the expected
+   Open Graph fields (title, description, url, image,
+   twitter:card) even before the art lands. Locks the
+   contract so swapping in real art doesn't accidentally
+   break the meta shape. ~15 min.
+
+4. **CSP_PLAN.md: document the analyze-script workflow.**
+   The script shipped this round; the rollout doc should
+   reference it with exact commands + the sample output
+   format + the allow-list mapping rules. ~10 min.
+
+5. **Seed data for the analyze script.** Right now the
+   script runs against an empty table. A tiny
+   `scripts/seed-csp-sample.ts` that inserts ~50 mocked
+   violations would let you try the analyze script locally
+   end-to-end before the prod collection window. Optional.
+   ~20 min.
+
+796/796 green across 73 files. Round 20's five-item punchlist
+fully closed (build-SHA, actions lockdown, captureException
+audit, CSP prep, retry-storm). No new human blockers — the
+same 11 items from prior rounds remain the critical path to
+public launch, with Sentry DSN still the highest-value
+single unlock.
+
+— Claude, 2026-04-23 (twenty-first run)

@@ -20,6 +20,8 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { retryFailedCalls } from '@/lib/cron/retry-failed-calls';
 import { createLogger } from '@/lib/logger';
+import { assertCronAuth } from '@/lib/security/cron-auth';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('cron/retry-failed-calls');
 
@@ -38,22 +40,10 @@ export async function GET(req: Request) {
 }
 
 async function handle(req: Request) {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    // Fail closed if the secret isn't configured. You REALLY don't
-    // want this endpoint open to the internet.
-    return Response.json(
-      { ok: false, error: 'CRON_SECRET not configured' },
-      { status: 500 }
-    );
-  }
-  const provided =
-    req.headers.get('x-cron-secret') ??
-    req.headers.get('X-Cron-Secret') ??
-    (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
-  if (provided !== expected) {
-    return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
-  }
+  // Fail closed if the secret isn't configured. You REALLY don't
+  // want this endpoint open to the internet.
+  const deny = assertCronAuth(req);
+  if (deny) return deny;
 
   const admin = createAdminClient();
   try {
@@ -64,6 +54,13 @@ async function handle(req: Request) {
     // but return only the short message to the caller so we don't leak
     // stack traces or internal query shapes to a misbehaving caller.
     log.error('run failed', { err });
+    // Canonical cron tag shape: { route: 'cron/<name>', reason }. Only
+    // one capture site in this file today; locking `reason` future-
+    // proofs the facet if we add a second (e.g. per-row retry
+    // failures surfaced as their own captures).
+    captureException(err, {
+      tags: { route: 'cron/retry-failed-calls', reason: 'runFailed' },
+    });
     return Response.json(
       {
         ok: false,

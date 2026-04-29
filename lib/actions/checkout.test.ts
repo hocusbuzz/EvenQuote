@@ -13,6 +13,25 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const origAppUrl = process.env.NEXT_PUBLIC_APP_URL;
 
+// ── Round 28 observability contract ──
+//
+// Shared captureException spy. Pattern mirrors R19's
+// post-payment.test.ts — the lib boundary captures so every caller
+// (server action from client today, admin-retry button tomorrow)
+// inherits observability coverage without duplicating try/catch at
+// every call site. Sentry dedupes on error fingerprint — route-level
+// captures in callers add route context as separate tag sets; they
+// don't double-count.
+const captureExceptionMock = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (err: unknown, ctx?: unknown) => captureExceptionMock(err, ctx),
+  captureMessage: vi.fn(),
+  init: vi.fn(),
+  isEnabled: () => false,
+  setUser: vi.fn(),
+  __resetForTests: vi.fn(),
+}));
+
 function mockHeaders(ip: string) {
   vi.doMock('next/headers', () => ({
     headers: () => ({
@@ -82,6 +101,7 @@ function mockStripe(result: { url?: string; throwErr?: Error }): StripeMock {
 describe('createCheckoutSession', () => {
   beforeEach(() => {
     vi.resetModules();
+    captureExceptionMock.mockReset();
     // Deterministic site URL so assertions are stable
     process.env.NEXT_PUBLIC_APP_URL = 'https://evenquote.com';
   });
@@ -252,6 +272,210 @@ describe('createCheckoutSession', () => {
       expect(res.error).not.toContain('API outage');
       expect(res.error).toMatch(/Could not start checkout/i);
     }
+  });
+
+  // ── Round 28 observability contract ──
+  //
+  // Prior to R28, `createCheckoutSession` had TWO silent failure
+  // paths that returned `{ok:false}` with no Sentry visibility:
+  //   1. `stripeReturnedEmptyUrl` — a non-thrown response with
+  //      `session.url === undefined`. Possible causes: Stripe SDK
+  //      contract break, restricted API key, account suspension.
+  //      Pre-R28 user saw "Stripe did not return a URL" on every
+  //      checkout attempt with zero ops signal.
+  //   2. `stripeSessionCreateFailed` — any thrown error from
+  //      `stripe.checkout.sessions.create`. Possible causes: Stripe
+  //      API outage, network partition, expired API key.
+  //      Pre-R28 the log.error fired but nothing paged ops. Checkout
+  //      is the top of the payment funnel — losing observability here
+  //      means losing the conversion signal entirely.
+  //
+  // Canonical tags now: `{ lib:'checkout', reason, requestId }`. Any
+  // new reason must be added to both the CheckoutReason type in
+  // checkout.ts AND to the regression-guard at the bottom of this
+  // file that forbids catch-alls.
+
+  it('captures to Sentry when Stripe throws, with canonical lib+reason tags', async () => {
+    mockHeaders(`5.5.14.${Math.floor(Math.random() * 254) + 1}`);
+    const reqId = '11111111-2222-3333-4444-555555555555';
+    mockAdmin({
+      id: reqId,
+      status: 'pending_payment',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({ throwErr: new Error('Stripe internal: card_declined 4.0.2') });
+    const { createCheckoutSession } = await import('./checkout');
+    const res = await createCheckoutSession({ requestId: reqId });
+    expect(res.ok).toBe(false);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    // The wrapped error hides Stripe's internal message — keeps
+    // Sentry fingerprints stable and prevents PII-adjacent leaks.
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('stripe.checkout.sessions.create failed');
+    expect((err as Error).message).not.toContain('card_declined');
+    // Tag schema lock.
+    expect(ctx).toMatchObject({
+      tags: {
+        lib: 'checkout',
+        reason: 'stripeSessionCreateFailed',
+        requestId: reqId,
+      },
+    });
+  });
+
+  it('captures to Sentry when Stripe returns no url, with canonical tags', async () => {
+    mockHeaders(`5.5.15.${Math.floor(Math.random() * 254) + 1}`);
+    const reqId = '22222222-3333-4444-5555-666666666666';
+    mockAdmin({
+      id: reqId,
+      status: 'pending_payment',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({}); // no throwErr, no url → SDK contract break
+    const { createCheckoutSession } = await import('./checkout');
+    const res = await createCheckoutSession({ requestId: reqId });
+    expect(res.ok).toBe(false);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/returned no url/i);
+    expect(ctx).toMatchObject({
+      tags: {
+        lib: 'checkout',
+        reason: 'stripeReturnedEmptyUrl',
+        requestId: reqId,
+      },
+    });
+  });
+
+  it('does NOT capture to Sentry on happy path', async () => {
+    // False-positive guard. If Sentry ever sees "lib:checkout" noise
+    // on a successful session, this test is the first place to check.
+    mockHeaders(`5.5.16.${Math.floor(Math.random() * 254) + 1}`);
+    mockAdmin({
+      id: '33333333-4444-5555-6666-777777777777',
+      status: 'pending_payment',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({ url: 'https://checkout.stripe.com/pay/cs_ok' });
+    const { createCheckoutSession } = await import('./checkout');
+    await createCheckoutSession({ requestId: '33333333-4444-5555-6666-777777777777' });
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT capture to Sentry on input-validation failures (infra noise guard)', async () => {
+    // Invalid UUID / not-found / wrong-status are all user-/caller-
+    // side inputs, not system failures. Capturing would flood Sentry
+    // with every malformed request and drown real incidents.
+    mockHeaders(`5.5.17.${Math.floor(Math.random() * 254) + 1}`);
+    mockAdmin(null);
+    mockStripe({ url: 'https://stripe.test/s/x' });
+    const { createCheckoutSession } = await import('./checkout');
+
+    await createCheckoutSession({ requestId: 'not-a-uuid' });
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+
+    // Also wrong-status path
+    vi.resetModules();
+    mockHeaders(`5.5.17.${Math.floor(Math.random() * 254) + 1}`);
+    mockAdmin({
+      id: '44444444-5555-6666-7777-888888888888',
+      status: 'failed',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({ url: 'https://stripe.test/s/y' });
+    const { createCheckoutSession: fresh } = await import('./checkout');
+    await fresh({ requestId: '44444444-5555-6666-7777-888888888888' });
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT include raw stripe message / customer email as tag value (PII guard)', async () => {
+    mockHeaders(`5.5.18.${Math.floor(Math.random() * 254) + 1}`);
+    const reqId = '55555555-6666-7777-8888-999999999999';
+    mockAdmin({
+      id: reqId,
+      status: 'pending_payment',
+      intake_data: { contact_email: 'private@customer.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({
+      throwErr: new Error('cu_xyz123 could not be charged: card_declined'),
+    });
+    const { createCheckoutSession } = await import('./checkout');
+    await createCheckoutSession({ requestId: reqId });
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    const serialized = JSON.stringify(ctx);
+    expect(serialized).not.toMatch(/private@customer\.com/);
+    expect(serialized).not.toMatch(/cu_xyz123/);
+    expect(serialized).not.toMatch(/card_declined/);
+  });
+
+  // Regression-guard: forbids catch-all reasons that would undermine
+  // Sentry facet granularity. Pattern from R25/R27.
+  it('never emits catch-all reason values (regression guard)', async () => {
+    mockHeaders(`5.5.19.${Math.floor(Math.random() * 254) + 1}`);
+    const reqId = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+    mockAdmin({
+      id: reqId,
+      status: 'pending_payment',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({ throwErr: new Error('boom') });
+    const { createCheckoutSession } = await import('./checkout');
+    await createCheckoutSession({ requestId: reqId });
+
+    const forbidden = new Set([
+      'unknown',
+      'error',
+      'checkoutFailed',
+      'stripeError',
+      'sessionFailed',
+      'runFailed',
+    ]);
+    for (const call of captureExceptionMock.mock.calls) {
+      const ctx = call[1] as { tags?: { reason?: string } };
+      const reason = ctx?.tags?.reason;
+      expect(reason).toBeDefined();
+      expect(forbidden.has(reason as string)).toBe(false);
+    }
+  });
+
+  it('tag object is strictly {lib, reason, requestId} — no extra facets', async () => {
+    // Tag schema lock. Prevents a future "helpful" addition of
+    // email/customerId/etc that would leak PII into the tracker.
+    mockHeaders(`5.5.20.${Math.floor(Math.random() * 254) + 1}`);
+    const reqId = '77777777-8888-9999-aaaa-bbbbbbbbbbbb';
+    mockAdmin({
+      id: reqId,
+      status: 'pending_payment',
+      intake_data: { contact_email: 'a@b.com' },
+      city: 'Austin',
+      state: 'TX',
+    });
+    mockStripe({ throwErr: new Error('boom') });
+    const { createCheckoutSession } = await import('./checkout');
+    await createCheckoutSession({ requestId: reqId });
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    const tagKeys = Object.keys((ctx as { tags: Record<string, string> }).tags).sort();
+    expect(tagKeys).toEqual(['lib', 'reason', 'requestId']);
   });
 
   it('rate-limits to 20/min/IP', async () => {

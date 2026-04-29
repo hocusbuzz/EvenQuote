@@ -18,6 +18,7 @@ import type { Metadata } from 'next';
 import { Fraunces } from 'next/font/google';
 import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
+import { headers } from 'next/headers';
 import './globals.css';
 
 const fraunces = Fraunces({
@@ -41,7 +42,7 @@ const METADATA_BASE = new URL(
 export const metadata: Metadata = {
   metadataBase: METADATA_BASE,
   title: {
-    default: 'EvenQuote — Get 20+ quotes in an hour, not a week',
+    default: 'EvenQuote — Get 10 real quotes in an hour, not a week',
     template: '%s | EvenQuote',
   },
   description:
@@ -74,14 +75,14 @@ export const metadata: Metadata = {
     type: 'website',
     locale: 'en_US',
     url: '/',
-    title: 'EvenQuote — Get 20+ quotes in an hour',
+    title: 'EvenQuote — Get 10 real quotes in an hour',
     description:
       'We dial local pros for you. You get a clean comparison report in your inbox. $9.99 flat.',
     siteName: 'EvenQuote',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'EvenQuote — Get 20+ quotes in an hour',
+    title: 'EvenQuote — Get 10 real quotes in an hour',
     description:
       'AI-powered quote collection from local service providers. $9.99 flat.',
   },
@@ -129,6 +130,16 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // Middleware (behind CSP_NONCE_ENABLED) sets this per-request so
+  // server components can nonce any inline <script> they render.
+  // When the flag is OFF, the header is absent and `nonce` is
+  // undefined — in that mode the static CSP from next.config.mjs is
+  // in force and inline JSON-LD is allowed without a nonce attribute.
+  // When the flag is ON, the header carries a fresh base64 nonce per
+  // request; we thread it through the dangerouslySetInnerHTML scripts
+  // below so they pass `script-src 'self' 'nonce-…' 'strict-dynamic'`.
+  const nonce = headers().get('x-nonce') ?? undefined;
+
   return (
     <html
       lang="en"
@@ -152,14 +163,23 @@ export default function RootLayout({
         {/* JSON-LD structured data. Emitted as script tags so Google can
             parse them. dangerouslySetInnerHTML is the standard React way
             to inject raw JSON here — the content is a literal constant
-            above, not user input, so there's no injection surface. */}
+            above, not user input, so there's no injection surface.
+
+            Nonce: when CSP_NONCE_ENABLED=true, middleware generates a
+            fresh base64 nonce per request and sets `x-nonce` on the
+            request headers. We read that above and apply it here so
+            these inline <script> tags pass `script-src 'nonce-…'`. When
+            the flag is off, `nonce` is undefined and React omits the
+            attribute — matching the current static-CSP behavior. */}
         <script
           type="application/ld+json"
+          nonce={nonce}
           // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationSchema) }}
         />
         <script
           type="application/ld+json"
+          nonce={nonce}
           // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{ __html: JSON.stringify(websiteSchema) }}
         />

@@ -99,8 +99,13 @@ describe('next.config.mjs — security posture', () => {
   it('sends a Content-Security-Policy with the minimal hardening directives', async () => {
     const h = await getGlobalHeaders();
     const csp = h['Content-Security-Policy'] ?? '';
-    // default-src defaults everything to same-origin unless overridden
-    expect(csp).toContain("default-src 'self'");
+    // IMPORTANT: we deliberately DO NOT set default-src here. Doing so
+    // becomes the fallback for script-src, which blocks Next.js's
+    // inline hydration bootstrap and leaves every client component
+    // dead on arrival. Once the nonce middleware in lib/security/csp.ts
+    // is wired up (see docs/CSP_PLAN.md) we can re-introduce default-src
+    // alongside a nonced script-src.
+    expect(csp).not.toContain("default-src 'self'");
     // Clickjacking blocker
     expect(csp).toContain("frame-ancestors 'none'");
     // Form-redirect abuse blocker; Stripe Checkout is the one allowed

@@ -4,6 +4,11 @@
 // visible at a time by default). Questions are the ones a real person
 // would ask before dropping $10 on this, answered honestly. The goal
 // here is to remove objections, not to pad the page.
+//
+// The sidebar carries the same "little person" character as HowItWorks,
+// in the "puzzled" variant — two question marks bobbing above their
+// head. It mirrors the section's headline "Fair to ask." without
+// over-selling the joke.
 
 import {
   Accordion,
@@ -11,6 +16,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from '@/components/ui/accordion';
+import { Character } from '@/components/site/character';
 
 const faqs = [
   {
@@ -19,7 +25,7 @@ const faqs = [
   },
   {
     q: 'What if businesses don\'t pick up?',
-    a: "We retry no-answers twice, spaced out. We typically reach 12-18 of the 25 we dial — which is still way more than you'd realistically call yourself. The report tells you who we reached, who we didn't, and why.",
+    a: "We retry no-answers twice, spaced out. We typically reach 6-8 of the 10 we dial — which is still way more than you'd realistically call yourself. The report tells you who we reached, who we didn't, and why.",
   },
   {
     q: 'Do the businesses know it\'s an AI?',
@@ -31,7 +37,7 @@ const faqs = [
   },
   {
     q: 'What areas do you cover?',
-    a: 'US only for now, and moving is our only category at launch. We\'re expanding to more services (HVAC, cleaning, contractors) once we prove the moving experience end-to-end.',
+    a: 'US only for now. Moving and house cleaning are live; handymen and lawn care are rolling out next. We start with a vertical once we have enough quality local businesses seeded to make the report feel comprehensive.',
   },
   {
     q: 'Will businesses start spamming my phone?',
@@ -43,21 +49,34 @@ export function FAQ() {
   return (
     <section id="faq" className="container py-24 sm:py-32">
       <div className="grid gap-12 md:grid-cols-[1fr_1.8fr] md:gap-16">
-        {/* Sidebar heading — editorial two-column layout */}
+        {/* Sidebar heading — editorial two-column layout. The
+            puzzled character lives under the subheading, sized so it's
+            a soft focal point rather than a logo. Bobbing question
+            marks tie visually to the headline's voice. */}
         <div>
           <p className="label-eyebrow mb-4">Questions</p>
           <h2 className="font-display text-5xl font-bold tracking-tight sm:text-6xl">
             Fair to&nbsp;ask.
           </h2>
           <p className="mt-6 text-muted-foreground">
-            Here's what people usually want to know before they pay.
+            Here&rsquo;s what people usually want to know before they pay.
           </p>
+          <div className="mt-10 text-foreground">
+            <Character variant="puzzled" size={140} />
+          </div>
         </div>
 
-        {/* Accordion */}
+        {/* Accordion. Each FAQ item fades up with a walking stagger
+            (60ms per item) so the list pours in top-to-bottom when the
+            section enters view rather than all at once. */}
         <Accordion type="single" collapsible className="w-full">
           {faqs.map((faq, i) => (
-            <AccordionItem key={i} value={`item-${i}`}>
+            <AccordionItem
+              key={i}
+              value={`item-${i}`}
+              className="animate-fade-up"
+              style={{ animationDelay: `${i * 60}ms` }}
+            >
               <AccordionTrigger>{faq.q}</AccordionTrigger>
               <AccordionContent>{faq.a}</AccordionContent>
             </AccordionItem>

@@ -6,15 +6,38 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
+// Round 22 lib-boundary capture audit: the facade must NOT emit its own
+// captureException. All capture happens inside engine (see
+// lib/calls/engine.test.ts for the claimFailed/insertFailed locks).
+// Double-capture would re-fingerprint the same error under two lib
+// tags and inflate alert volume; no-capture-at-facade is the contract.
+const captureExceptionMock = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (err: unknown, ctx?: unknown) =>
+    captureExceptionMock(err, ctx),
+  captureMessage: vi.fn(),
+  init: vi.fn(),
+  isEnabled: () => false,
+  setUser: vi.fn(),
+  __resetForTests: vi.fn(),
+}));
+
 function mockEngine(result: unknown) {
   vi.doMock('@/lib/calls/engine', () => ({
     runCallBatch: vi.fn().mockResolvedValue(result),
   }));
 }
 
+function mockEngineThrows(err: Error) {
+  vi.doMock('@/lib/calls/engine', () => ({
+    runCallBatch: vi.fn().mockRejectedValue(err),
+  }));
+}
+
 describe('enqueueQuoteCalls', () => {
   beforeEach(() => {
     vi.resetModules();
+    captureExceptionMock.mockReset();
   });
 
   it('throws when quoteRequestId is missing', async () => {
@@ -151,5 +174,63 @@ describe('enqueueQuoteCalls', () => {
     } else {
       expect.fail('expected advanced=true');
     }
+  });
+
+  // ── Round 22 lib-boundary capture audit ──
+  //
+  // enqueueQuoteCalls is a pass-through translation layer over
+  // runCallBatch. Engine captures claimFailed / insertFailed at its
+  // own lib boundary (`{ lib: 'enqueue', reason: '…' }`) — see
+  // lib/calls/engine.test.ts. The facade must stay silent so that a
+  // single logical error fires exactly ONE lib-tagged capture event
+  // (the route layer adds its own orthogonal `{ route, … }` facet).
+  // Double-capture here would re-fingerprint under two lib tags and
+  // inflate alert volume on every engine failure.
+
+  it('does NOT capture on the happy path (no double-capture at facade)', async () => {
+    mockEngine({
+      ok: true,
+      quoteRequestId: 'qr-nocap-happy',
+      selected: 5,
+      dispatched: 5,
+      failed: 0,
+      simulated: false,
+      notes: [],
+    });
+    const { enqueueQuoteCalls } = await import('./enqueue-calls');
+    await enqueueQuoteCalls({ quoteRequestId: 'qr-nocap-happy' });
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT capture when engine returns ok:false (soft failure, not an exception)', async () => {
+    // ok:false is a soft-failure reason string (e.g. "no businesses
+    // matched") — the engine already decided this isn't capture-worthy.
+    // Facade must not retroactively upgrade it to a capture.
+    mockEngine({
+      ok: false,
+      quoteRequestId: 'qr-nocap-soft',
+      selected: 0,
+      dispatched: 0,
+      failed: 0,
+      simulated: false,
+      notes: ['no businesses matched'],
+    });
+    const { enqueueQuoteCalls } = await import('./enqueue-calls');
+    await enqueueQuoteCalls({ quoteRequestId: 'qr-nocap-soft' });
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT capture when engine throws — exception propagates, engine already captured', async () => {
+    // When engine throws (claimFailed / insertFailed path), engine.ts
+    // has already fired captureException with its canonical tags. The
+    // facade just lets the error bubble — no try/catch, no second
+    // capture. This lock ensures a future maintainer doesn't add a
+    // "defensive" catch-and-capture here.
+    mockEngineThrows(new Error('runCallBatch claim: db connection reset'));
+    const { enqueueQuoteCalls } = await import('./enqueue-calls');
+    await expect(
+      enqueueQuoteCalls({ quoteRequestId: 'qr-nocap-throw' })
+    ).rejects.toThrow(/runCallBatch claim/);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 });

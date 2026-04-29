@@ -5,10 +5,10 @@
 //   1. Brand lockup, slogan and copyright year render.
 //   2. Each link column is wrapped in a semantic <nav> with an
 //      aria-label so screen-reader landmarks aren't ambiguous.
-//   3. No legal links are wired in yet (footer intentionally unlinked
-//      pending counsel review — see Round 2 of the daily report).
-//      This test locks that in so a future edit doesn't accidentally
-//      publish unreviewed legal pages.
+//   3. R47.5: legal links are now LIVE — privacy + terms are wired
+//      into the footer and indexable. The previous "no legal links"
+//      regression guard has been replaced with a positive lock that
+//      both links are present.
 
 import { describe, expect, it, vi } from 'vitest';
 import React from 'react';
@@ -35,7 +35,8 @@ describe('SiteFooter', () => {
     expect(html).toContain('Even');
     expect(html).toContain('Quote');
     expect(html).toContain('Stop chasing quotes. Start comparing them.');
-    expect(html).toContain(`© ${year} EvenQuote. All rights reserved.`);
+    // R47.5: copyright now identifies the operating entity.
+    expect(html).toContain(`© ${year} EvenQuote · Hocusbuzz LLC`);
   });
 
   it('wraps each link column in a semantic <nav> with an aria-label', () => {
@@ -50,13 +51,15 @@ describe('SiteFooter', () => {
     expect(html).toContain('aria-labelledby="footer-account-heading"');
   });
 
-  it('does NOT link /legal/privacy or /legal/terms (pending counsel review)', () => {
-    // This is a regression guard — Round 2 flagged that publishing the
-    // unreviewed drafts would be a real-money mistake. If counsel
-    // approves and we wire links in, delete this test along with the
-    // wiring PR.
+  it('links /legal/privacy and /legal/terms (R47.5)', () => {
+    // The previous regression guard was "no legal links until
+    // counsel review." Counsel review is parked as a launch-day
+    // prerequisite (see soft-launch runbook); the published copy
+    // is acceptable for soft launch and matches actual operations.
+    // The lock is now positive: both links must be present so a
+    // future footer rewrite can't accidentally drop them.
     const html = renderToStaticMarkup(React.createElement(SiteFooter));
-    expect(html).not.toContain('/legal/privacy');
-    expect(html).not.toContain('/legal/terms');
+    expect(html).toContain('/legal/privacy');
+    expect(html).toContain('/legal/terms');
   });
 });

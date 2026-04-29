@@ -60,11 +60,20 @@ create index if not exists quote_contact_releases_user_idx
 -- and the send, then inserts the audit row with the service client.
 alter table public.quote_contact_releases enable row level security;
 
+-- Drop-then-recreate so this migration is idempotent under a
+-- disaster-recovery re-apply. Postgres < 15 has no `create policy if
+-- not exists`, so `drop policy if exists` is the canonical guard.
+-- The whole file runs inside a transaction (`begin;…commit;`) so
+-- there is no live window where the policy is absent.
+drop policy if exists "quote_contact_releases: owner read"
+  on public.quote_contact_releases;
 create policy "quote_contact_releases: owner read"
   on public.quote_contact_releases
   for select
   using (released_by_user_id = auth.uid());
 
+drop policy if exists "quote_contact_releases: admin read all"
+  on public.quote_contact_releases;
 create policy "quote_contact_releases: admin read all"
   on public.quote_contact_releases
   for select

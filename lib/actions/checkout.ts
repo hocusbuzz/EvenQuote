@@ -32,8 +32,22 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getStripe, QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('createCheckoutSession');
+
+// ── Canonical Sentry tag shape for this lib ──
+// Shape matches the R19 post-payment.ts / R26 extract-quote.ts / R27
+// cron-send-reports pattern: `{ lib, reason, requestId? }`. Any new
+// reason must be added to this union AND to the regression-guard in
+// checkout.test.ts that forbids catch-alls.
+//
+// DO NOT add customer-email, phone, or raw Stripe error message as a
+// tag value. Logger redacts these in logs; Sentry tags are opinionated
+// structured metadata we control, so the boundary lives here.
+export type CheckoutReason =
+  | 'stripeSessionCreateFailed'
+  | 'stripeReturnedEmptyUrl';
 
 const Input = z.object({
   requestId: z.string().uuid('Invalid request id'),
@@ -154,12 +168,42 @@ export async function createCheckoutSession(
     });
 
     if (!session.url) {
+      // Pre-R28 this branch was silent. Stripe returned a non-thrown
+      // response with no url — that's either an SDK contract break
+      // (Stripe changed response shape) or an account-state issue
+      // (e.g. restricted key). Either way we cannot recover, and
+      // every user sees "did not return" with zero ops signal unless
+      // we capture here.
+      captureException(new Error('Stripe checkout.sessions.create returned no url'), {
+        tags: {
+          lib: 'checkout',
+          reason: 'stripeReturnedEmptyUrl' satisfies CheckoutReason,
+          requestId,
+        },
+      });
       return { ok: false, error: 'Stripe did not return a checkout URL' };
     }
 
     return { ok: true, url: session.url };
   } catch (err) {
+    // Pre-R28 this catch logged only. A Stripe API outage, a
+    // misconfigured key, or a breaking SDK change would silently
+    // fail every checkout with zero Sentry visibility — this is the
+    // first page of the payment funnel, so losing observability here
+    // means losing the top-of-funnel conversion signal entirely.
+    //
+    // Wrap before capture so Sentry fingerprints on a message we
+    // control (prevents leaky Stripe internal messages from becoming
+    // search keys in the tracker).
     log.error('Stripe error', { err });
+    const wrapped = new Error('stripe.checkout.sessions.create failed');
+    captureException(wrapped, {
+      tags: {
+        lib: 'checkout',
+        reason: 'stripeSessionCreateFailed' satisfies CheckoutReason,
+        requestId,
+      },
+    });
     return { ok: false, error: 'Could not start checkout. Please try again.' };
   }
 }

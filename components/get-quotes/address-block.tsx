@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { FieldErrors } from '@/lib/forms/use-step-validation';
+import { AddressAutocomplete, type ParsedAddress } from './address-autocomplete';
 
 type AddressPrefix = 'origin' | 'destination';
 
@@ -29,7 +30,9 @@ type AddressKeys<P extends AddressPrefix> =
   | `${P}_address`
   | `${P}_city`
   | `${P}_state`
-  | `${P}_zip`;
+  | `${P}_zip`
+  | `${P}_lat`
+  | `${P}_lng`;
 
 type Props<P extends AddressPrefix> = {
   prefix: P;
@@ -60,6 +63,32 @@ export function AddressBlock<P extends AddressPrefix>({
     onFieldChange?.(field);
   };
 
+  const keyLat = `${prefix}_lat` as const;
+  const keyLng = `${prefix}_lng` as const;
+
+  // When the user picks a Google prediction, fill all four fields at
+  // once. Only overwrite city/state/zip if Google returned something
+  // — preserves whatever the user may have already typed if Google's
+  // parse is incomplete (rare, but happens for PO boxes etc.).
+  // Also stash lat/lng on the draft when present — the on-demand
+  // business seeder + radius selector need them, and they're "free"
+  // here because Place Details already returned them.
+  const handleAutocompletePick = (parsed: ParsedAddress) => {
+    if (parsed.address_line) update(keyAddress as AddressKeys<P>, parsed.address_line);
+    if (parsed.city) update(keyCity as AddressKeys<P>, parsed.city);
+    if (parsed.state) update(keyState as AddressKeys<P>, parsed.state);
+    if (parsed.zip_code) update(keyZip as AddressKeys<P>, parsed.zip_code);
+    // setField is typed as <K, V extends Draft[K]> — the cast funnels
+    // a number through the same typed setter the address-string fields
+    // use. Numeric typing is enforced by Zod on submit.
+    if (typeof parsed.latitude === 'number') {
+      setField(keyLat as keyof MovingIntakeDraft, parsed.latitude as never);
+    }
+    if (typeof parsed.longitude === 'number') {
+      setField(keyLng as keyof MovingIntakeDraft, parsed.longitude as never);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <FormField
@@ -68,21 +97,26 @@ export function AddressBlock<P extends AddressPrefix>({
         required
         error={errors[keyAddress]}
       >
-        <Input
+        <AddressAutocomplete
           id={keyAddress}
           autoComplete={prefix === 'origin' ? 'address-line1' : 'shipping address-line1'}
           value={get(keyAddress)}
-          onChange={(e) => update(keyAddress as AddressKeys<P>, e.target.value)}
-          placeholder="123 Main St"
+          onChange={(v) => update(keyAddress as AddressKeys<P>, v)}
+          onSelectAddress={handleAutocompletePick}
+          placeholder="Start typing — we'll suggest addresses"
         />
       </FormField>
 
       <div className="grid gap-5 sm:grid-cols-[1fr_auto_auto]">
         <FormField label="City" htmlFor={keyCity} required error={errors[keyCity]}>
-          <Input
+          <AddressAutocomplete
             id={keyCity}
+            type="city"
+            autoComplete={prefix === 'origin' ? 'address-level2' : 'shipping address-level2'}
             value={get(keyCity)}
-            onChange={(e) => update(keyCity as AddressKeys<P>, e.target.value)}
+            onChange={(v) => update(keyCity as AddressKeys<P>, v)}
+            onSelectAddress={handleAutocompletePick}
+            placeholder="San Diego"
           />
         </FormField>
 
@@ -117,12 +151,14 @@ export function AddressBlock<P extends AddressPrefix>({
           error={errors[keyZip]}
           className="sm:w-36"
         >
-          <Input
+          <AddressAutocomplete
             id={keyZip}
+            type="zip"
             inputMode="numeric"
             autoComplete="postal-code"
             value={get(keyZip)}
-            onChange={(e) => update(keyZip as AddressKeys<P>, e.target.value)}
+            onChange={(v) => update(keyZip as AddressKeys<P>, v)}
+            onSelectAddress={handleAutocompletePick}
             placeholder="92101"
           />
         </FormField>

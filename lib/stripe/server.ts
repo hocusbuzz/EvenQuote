@@ -47,5 +47,5 @@ export const QUOTE_REQUEST_PRICE = {
   currency: 'usd',
   productName: 'EvenQuote — AI Quote Request',
   productDescription:
-    'We call up to 20 local businesses, collect quotes, and deliver a side-by-side report.',
+    'We call local businesses for you, collect quotes, and deliver a side-by-side report.',
 } as const;

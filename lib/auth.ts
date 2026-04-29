@@ -52,7 +52,7 @@ export async function getProfile(): Promise<Profile | null> {
     // Profile row is created by a DB trigger on auth.users insert, so
     // this should never happen in normal flow. Log and surface as null
     // — the caller decides what to do.
-    log.error('failed to fetch profile', { userId: user.id, err: error.message });
+    log.error('failed to fetch profile', { userId: user.id, err: error });
     return null;
   }
 

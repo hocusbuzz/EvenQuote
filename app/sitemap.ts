@@ -5,6 +5,37 @@
 // /get-quotes/:slug page to the sitemap. Falls back to a static list if
 // the DB is unreachable at build time — don't want a sitemap build
 // failure to block a deploy.
+//
+// ── Observability contract (R35 audit) ────────────────────────────
+// This generator deliberately does NOT wire captureException on any
+// path. Reasoning:
+//   1. PUBLIC BOT-CRAWL FREQUENCY — Google's sitemap fetcher hits
+//      /sitemap.xml on its own schedule (typically daily, sometimes
+//      more often during a recrawl). A captureException on the DB-
+//      unreachable branch would flood Sentry at crawler frequency
+//      during a transient Supabase outage. Same rationale as the
+//      R33 health/version probe attestation and R32 csp-report
+//      attestation.
+//   2. GRACEFUL DEGRADATION IS THE FEATURE — the bare `try { } catch
+//      { categories = []; }` is intentional. A DB hiccup at sitemap-
+//      generation time degrades to a static-only sitemap; any other
+//      reachable downstream (deploy, dashboard, crons) will surface
+//      the underlying Supabase outage with its own canonical capture
+//      tags well before this is the first-noticed signal. Wrapping
+//      this catch with captureException would (a) double-capture vs
+//      whatever app/api/cron/check-status's stripe/vapi probe is
+//      already firing, (b) add no new operator signal — they already
+//      know the DB is down.
+//   3. NEXT.JS PLATFORM OWNS THE ROUTE BOUNDARY — if the function
+//      itself throws outside the try-block (it can't on the current
+//      code paths — the only operations are Date construction, env
+//      read, and template-string interpolation, none of which can
+//      throw), the App Router serves a generic 500 and the platform
+//      Sentry wrapping kicks in. R26 no-double-capture rule.
+//
+// Regression-guards in sitemap.test.ts lock this no-capture
+// contract. If you ever need to break the rule, update the test AND
+// add a comment justifying the new capture site.
 
 import type { MetadataRoute } from 'next';
 

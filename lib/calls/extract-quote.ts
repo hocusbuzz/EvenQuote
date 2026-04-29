@@ -1,3 +1,5 @@
+import { captureException } from '@/lib/observability/sentry';
+
 // Turn a call transcript/summary/analysis payload into a structured
 // quote row. Gated behind ANTHROPIC_API_KEY — if unset, we skip
 // extraction but the call still completes cleanly (no quote row
@@ -89,13 +91,13 @@ const DEFAULT_CATEGORY: CategoryContext = {
 const EXTRACTION_TOOL_SCHEMA = {
   type: 'object',
   properties: {
-    priceMin: { type: ['number', 'null'], description: 'Low end of price range in USD. null if not stated.' },
-    priceMax: { type: ['number', 'null'], description: 'High end of price range in USD. null if not stated.' },
-    priceDescription: { type: ['string', 'null'], description: 'e.g. "flat $1,200" or "$150/hr with 2hr min"' },
-    availability: { type: ['string', 'null'], description: 'What they said about the requested date/frequency.' },
-    includes: { type: 'array', items: { type: 'string' }, description: 'Things included in the price.' },
-    excludes: { type: 'array', items: { type: 'string' }, description: 'Things NOT included, or charged extra.' },
-    notes: { type: ['string', 'null'], description: 'Anything else worth remembering.' },
+    priceMin: { type: ['number', 'null'], description: 'Low end of price range in USD. Whole-dollar number, no cents (round if needed). null if not stated.' },
+    priceMax: { type: ['number', 'null'], description: 'High end of price range in USD. Whole-dollar number, no cents (round if needed). null if not stated.' },
+    priceDescription: { type: ['string', 'null'], description: 'Brief context on the price structure ONLY when it adds info, e.g. "flat rate" or "$150/hr with 2hr minimum". Do NOT restate priceMin/priceMax. Keep under 12 words. null if the range is self-explanatory.' },
+    availability: { type: ['string', 'null'], description: 'Concise factual statement about scheduling. Examples: "Available December 1", "Booked through Dec 15, can do Dec 16+", "2-week lead time". Keep under 15 words. NOT a narrative.' },
+    includes: { type: 'array', items: { type: 'string' }, description: 'Short bullet phrases (2-6 words each) of what is bundled into the base price. Examples: ["3 movers", "26ft truck", "basic liability", "furniture assembly"]. Empty array if nothing was clarified.' },
+    excludes: { type: 'array', items: { type: 'string' }, description: 'Extra costs / fees charged on top of the base price. Include dollar amounts inline when stated. Examples: ["stairs fee $50/flight", "fuel surcharge ~10%", "packing materials extra", "long-carry fee"]. Empty array if no extras were mentioned. This is NOT a list of features they don\'t offer — it is specifically items that cost more.' },
+    notes: { type: ['string', 'null'], description: 'OTHER catch-all for short factual details NOT covered by the other fields. Examples: "Requires 50% deposit", "24-hour cancellation policy", "Cash discount available", "Weekend surcharge applies". Max 30 words. NEVER write a narrative summary of the call (no "the AI asked", "they confirmed", "the assistant called"). null if there is nothing to add.' },
     contactName: { type: ['string', 'null'] },
     contactPhone: { type: ['string', 'null'] },
     contactEmail: { type: ['string', 'null'] },
@@ -132,6 +134,21 @@ export async function extractQuoteFromCall(input: ExtractInput): Promise<Extract
   }
 
   // 2. Claude fallback.
+  //
+  // Canonical Sentry tag shape for this lib:
+  //   { lib: 'extract-quote', reason: '<mode>' [, httpStatus?] }
+  //
+  // Two result reasons are *benign* (configuration / upstream empty)
+  // and intentionally NOT captured:
+  //   • ANTHROPIC_API_KEY unset — by design on non-prod envs.
+  //   • Transcript empty     — Vapi sometimes closes a call with no
+  //     transcript (voicemail not left, carrier hangup). Capturing
+  //     would flood the tracker on every such call.
+  //
+  // Everything else (HTTP non-2xx, missing tool_use, schema coercion
+  // fail, transport error) IS captured — each is a real signal that
+  // either Anthropic, the prompt, or the network is misbehaving and
+  // ops wants per-mode alerting without parsing `reason` strings.
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return { ok: false, reason: 'ANTHROPIC_API_KEY not set; skipping extraction' };
@@ -175,7 +192,18 @@ export async function extractQuoteFromCall(input: ExtractInput): Promise<Extract
     });
 
     if (!res.ok) {
-      return { ok: false, reason: `Anthropic ${res.status} ${await res.text()}` };
+      const errText = (await res.text()).slice(0, 500);
+      const wrapped = new Error(
+        `Anthropic extract-quote HTTP ${res.status}: ${errText}`
+      );
+      captureException(wrapped, {
+        tags: {
+          lib: 'extract-quote',
+          reason: 'extractHttpFailed',
+          httpStatus: String(res.status),
+        },
+      });
+      return { ok: false, reason: `Anthropic ${res.status} ${errText}` };
     }
 
     const body = (await res.json()) as {
@@ -188,16 +216,32 @@ export async function extractQuoteFromCall(input: ExtractInput): Promise<Extract
       (b): b is { type: 'tool_use'; name: string; input: unknown } => b.type === 'tool_use'
     );
     if (!toolUse) {
+      const wrapped = new Error('Anthropic extract-quote response missing tool_use block');
+      captureException(wrapped, {
+        tags: { lib: 'extract-quote', reason: 'extractMissingToolUse' },
+      });
       return { ok: false, reason: 'Anthropic response missing tool_use block' };
     }
 
     const quote = coerceFromClaude(toolUse.input);
-    if (!quote) return { ok: false, reason: 'Anthropic response failed schema coercion' };
+    if (!quote) {
+      const wrapped = new Error('Anthropic extract-quote response failed schema coercion');
+      captureException(wrapped, {
+        tags: { lib: 'extract-quote', reason: 'extractSchemaCoercionFailed' },
+      });
+      return { ok: false, reason: 'Anthropic response failed schema coercion' };
+    }
     return { ok: true, quote, source: 'claude' };
   } catch (err) {
+    // Transport layer: DNS / TLS / socket / timeout. Wrap non-Error
+    // throws so the tracker always sees a real stack trace.
+    const wrapped = err instanceof Error ? err : new Error(String(err));
+    captureException(wrapped, {
+      tags: { lib: 'extract-quote', reason: 'extractTransportFailed' },
+    });
     return {
       ok: false,
-      reason: err instanceof Error ? err.message : String(err),
+      reason: wrapped.message,
     };
   }
 }
@@ -262,6 +306,29 @@ function coerceFromVapi(data: unknown): ExtractedQuote | null {
   });
 }
 
+// Narrative leak guard: even with a tightened prompt, an LLM can
+// occasionally smuggle a call summary into a free-text field. Patterns
+// like "An AI assistant called…" / "The AI confirmed…" / "The
+// assistant asked…" are dead giveaways that we got narrative instead
+// of a factual note. Strip the field rather than render it. This is a
+// belt-and-braces defense — prompt updates do most of the work, this
+// catches the long tail. R47.1.
+const NARRATIVE_PATTERNS: readonly RegExp[] = [
+  /\b(?:an?\s+)?ai\s+(?:assistant|agent)?\s*(?:called|reached out|contacted)/i,
+  /\bthe\s+ai\s+(?:asked|confirmed|stated|noted|said|told|spoke)/i,
+  /\bthe\s+(?:assistant|agent)\s+(?:asked|confirmed|stated|spoke|called)/i,
+  /\bcalled\s+on\s+behalf\s+of\b/i,
+  /\bto\s+(?:pass|share|relay)\s+(?:along|on)\s+to\s+the\s+customer\b/i,
+];
+
+function stripNarrative(s: string | null): string | null {
+  if (!s) return s;
+  for (const re of NARRATIVE_PATTERNS) {
+    if (re.test(s)) return null;
+  }
+  return s;
+}
+
 function coerceFromClaude(raw: unknown): ExtractedQuote | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
@@ -284,11 +351,11 @@ function coerceFromClaude(raw: unknown): ExtractedQuote | null {
   return {
     priceMin: num(r.priceMin),
     priceMax: num(r.priceMax),
-    priceDescription: str(r.priceDescription),
-    availability: str(r.availability),
+    priceDescription: stripNarrative(str(r.priceDescription)),
+    availability: stripNarrative(str(r.availability)),
     includes: arr(r.includes),
     excludes: arr(r.excludes),
-    notes: str(r.notes),
+    notes: stripNarrative(str(r.notes)),
     contactName: str(r.contactName),
     contactPhone: str(r.contactPhone),
     contactEmail: str(r.contactEmail),

@@ -118,6 +118,26 @@ export type QuoteForReport = {
  */
 export type RefundOutcome = 'issued' | 'pending_support' | 'not_applicable';
 
+/**
+ * Distinguishes WHY the report has zero quotes — drives the email
+ * copy in the empty state. The `coverage_gap` value comes from the
+ * webhook's advanced:false path, where no businesses were ever
+ * contacted (vs `no_response` where calls happened but didn't yield
+ * usable quotes). Saying "we called the local pros" in the
+ * coverage-gap case would be a flat-out lie.
+ *
+ * Optional — undefined means we don't know the cause; the template
+ * falls back to the "no_response" wording, which is accurate for
+ * the legacy zero-quote-after-calls case (the most common shape
+ * pre-R47.5).
+ *
+ * Named `NoQuoteCause` (not `*Reason`) deliberately — the lib/
+ * Reason-type audit (R35) reserves the `*Reason` suffix for Sentry
+ * capture-tag unions and would mis-classify this email content
+ * enum as a Sentry tag.
+ */
+export type NoQuoteCause = 'coverage_gap' | 'no_response';
+
 export type QuoteReportInput = {
   recipientName: string | null;
   categoryName: string;
@@ -129,6 +149,8 @@ export type QuoteReportInput = {
   coverageSummary: string;
   /** Only consulted when quotes.length === 0. */
   refundOutcome?: RefundOutcome;
+  /** Only consulted when quotes.length === 0. R47.6. */
+  noQuoteCause?: NoQuoteCause;
 };
 
 export function renderQuoteReport(input: QuoteReportInput): Rendered {
@@ -148,7 +170,7 @@ export function renderQuoteReport(input: QuoteReportInput): Rendered {
         ? `<div style="margin-top:10px; font-size:13px;"><strong>Included:</strong> ${escapeHtml((q.includes ?? []).join(', '))}</div>`
         : '';
       const excludes = (q.excludes ?? []).length
-        ? `<div style="margin-top:6px; font-size:13px;"><strong>Not included:</strong> ${escapeHtml((q.excludes ?? []).join(', '))}</div>`
+        ? `<div style="margin-top:6px; font-size:13px;"><strong>Extras / fees:</strong> ${escapeHtml((q.excludes ?? []).join(', '))}</div>`
         : '';
       const notes = q.notes
         ? `<div style="margin-top:10px; font-size:13px; color:#374151; font-style:italic;">"${escapeHtml(q.notes)}"</div>`
@@ -178,37 +200,70 @@ export function renderQuoteReport(input: QuoteReportInput): Rendered {
     })
     .join('\n');
 
-  // Refund copy varies based on what actually happened upstream. Never
-  // promise something that didn't occur — "we're refunding your request"
-  // in the template originally ran whether or not a refund was issued,
-  // which was a truthfulness bug. The send-reports cron now passes a
-  // real outcome in refundOutcome.
+  // Refund copy is a 2-D matrix — refundOutcome × noQuoteReason.
+  //
+  // Why both axes:
+  //   • refundOutcome tells the customer whether their money is on
+  //     the way back automatically, manually, or unknown.
+  //   • noQuoteReason tells the customer WHY there are no quotes.
+  //     Saying "we called the local pros" when no calls were placed
+  //     (the coverage-gap path) is a truthfulness bug. R47.6 added
+  //     the second axis after Codex flagged the inaccuracy.
+  //
+  // We compose copy as: <reason explanation> + <refund status>.
   const refundCopy = (() => {
     if (input.quotes.length > 0) return '';
-    switch (input.refundOutcome) {
-      case 'issued':
-        return `We called the local pros but couldn&#039;t get a firm quote on this round. This usually
+
+    const causeExplanation =
+      input.noQuoteCause === 'coverage_gap'
+        ? // No calls were placed. Distinct from "called and got
+          // nothing useful" — this is "we couldn't find anyone to
+          // call." More common in cold-start zips.
+          `We searched for local ${escapeHtml(input.categoryName.toLowerCase())} pros near
+          ${escapeHtml(input.city)}, ${escapeHtml(input.state)}, but couldn&#039;t find any to call
+          for you. Nothing was billed against any pro&#039;s time.`
+        : // Default + 'no_response': calls were placed but didn't yield
+          // usable quotes. Pre-R47.6 this was the only branch.
+          `We called the local pros but couldn&#039;t get a firm quote on this round. This usually
           means they didn&#039;t pick up, or they needed to see the job in person before
-          pricing. We&#039;ve refunded your $9.99 back to the original card — it typically shows up
+          pricing.`;
+
+    const refundStatus = (() => {
+      switch (input.refundOutcome) {
+        case 'issued':
+          return `We&#039;ve refunded your $9.99 back to the original card — it typically shows up
           within 5–10 business days.`;
-      case 'pending_support':
-        return `We called the local pros but couldn&#039;t get a firm quote on this round. This usually
-          means they didn&#039;t pick up, or they needed to see the job in person before
-          pricing. Reply to this email and we&#039;ll process your $9.99 refund manually within
+        case 'pending_support':
+          return `Reply to this email and we&#039;ll process your $9.99 refund manually within
           one business day — sorry for the extra step.`;
-      default:
-        // No refundOutcome passed (legacy call site) or 'not_applicable'
-        // on zero quotes. Safe fallback: promise human follow-up instead
-        // of an automatic refund we didn't actually issue.
-        return `We called the local pros but couldn&#039;t get a firm quote on this round. This usually
-          means they didn&#039;t pick up, or they needed to see the job in person before
-          pricing. Reply to this email and we&#039;ll make it right.`;
-    }
+        default:
+          // No refundOutcome (legacy call site) or 'not_applicable'.
+          // Safe fallback: promise human follow-up rather than an
+          // automatic refund we didn't actually issue.
+          return `Reply to this email and we&#039;ll make it right.`;
+      }
+    })();
+
+    return `${causeExplanation} ${refundStatus}`;
   })();
 
   const emptyState = refundCopy
     ? `<p style="font-size:14px; color:#374151;">${refundCopy}</p>`
     : '';
+
+  // R47.5: provenance disclosure in the report email mirrors the
+  // banner on the customer dashboard. The email is the more formal
+  // surface so the language is slightly fuller — but the takeaway
+  // is the same: AI-extracted, verify before paying.
+  const provenanceCallout =
+    input.quotes.length > 0
+      ? `<p style="margin:0 0 20px 0; padding:12px 14px; font-size:13px; color:#92400e; background-color:#FEF3C7; border:1px solid #FCD34D; border-radius:6px;">
+           <strong>Heads up:</strong> these quotes were extracted by AI from
+           recorded phone calls. They&rsquo;re a starting point for comparison,
+           not a binding offer. Always confirm price + scope in writing with
+           the pro before paying anything.
+         </p>`
+      : '';
 
   const inner = `
     <p style="font-size:16px; margin:0 0 12px 0;">${greeting}</p>
@@ -216,7 +271,8 @@ export function renderQuoteReport(input: QuoteReportInput): Rendered {
       Here's what we heard from local ${escapeHtml(input.categoryName.toLowerCase())} pros in
       ${escapeHtml(input.city)}, ${escapeHtml(input.state)}.
     </p>
-    <p style="font-size:13px; margin:0 0 24px 0; color:#6b7280;">${escapeHtml(input.coverageSummary)}</p>
+    <p style="font-size:13px; margin:0 0 16px 0; color:#6b7280;">${escapeHtml(input.coverageSummary)}</p>
+    ${provenanceCallout}
     ${emptyState}
     ${quoteCards}
     ${input.quotes.length > 0
@@ -235,13 +291,21 @@ export function renderQuoteReport(input: QuoteReportInput): Rendered {
     `Here's what we heard from local ${input.categoryName.toLowerCase()} pros in ${input.city}, ${input.state}.`,
     `${input.coverageSummary}`,
     ``,
+    ...(input.quotes.length > 0
+      ? [
+          `Heads up: these quotes were extracted by AI from recorded phone calls.`,
+          `They're a starting point for comparison, not a binding offer.`,
+          `Always confirm price + scope in writing with the pro before paying.`,
+          ``,
+        ]
+      : []),
     ...input.quotes.map((q, i) =>
       [
         `${i + 1}. ${q.businessName} — ${formatPriceRange(q.priceMin, q.priceMax)}`,
         q.priceDescription ? `   ${q.priceDescription}` : '',
         q.availability ? `   Available: ${q.availability}` : '',
         (q.includes ?? []).length ? `   Includes: ${(q.includes ?? []).join(', ')}` : '',
-        (q.excludes ?? []).length ? `   Excludes: ${(q.excludes ?? []).join(', ')}` : '',
+        (q.excludes ?? []).length ? `   Extras / fees: ${(q.excludes ?? []).join(', ')}` : '',
         q.notes ? `   Notes: ${q.notes}` : '',
         q.requiresOnsiteEstimate ? `   (On-site estimate requested)` : '',
       ]
@@ -258,6 +322,95 @@ export function renderQuoteReport(input: QuoteReportInput): Rendered {
     html: htmlShell(inner),
     text,
   };
+}
+
+// ─── 1b. Stuck-request ops alert (R47.3) ───────────────────────────
+//
+// Sent by the check-stuck-requests cron when ≥1 quote_request has been
+// parked past its SLA. Audience is "Antonio holding a phone" — copy
+// is dense, no fluff, deep links to /admin so investigation starts
+// in one click.
+//
+// Not customer-facing. Lives in the same templates module so the
+// chrome (header, button, footer) stays uniform across every mail
+// the product sends.
+
+export type StuckRequestRow = {
+  id: string;
+  status: string;
+  location: string;
+  minutesStuck: number;
+  /** Deep link straight into /admin/requests/<id>. Empty string when
+   *  NEXT_PUBLIC_APP_URL is unset (don't render the link). */
+  adminUrl: string;
+};
+
+export function renderStuckRequestsAlert(input: {
+  rows: StuckRequestRow[];
+}): Rendered {
+  const n = input.rows.length;
+  const subject =
+    n === 1
+      ? `[EvenQuote ops] 1 stuck request needs attention`
+      : `[EvenQuote ops] ${n} stuck requests need attention`;
+
+  const rowHtml = input.rows
+    .map((r) => {
+      const link = r.adminUrl
+        ? `<a href="${escapeHtml(r.adminUrl)}" style="color:#0A0A0A; text-decoration:underline;">${escapeHtml(r.id.slice(0, 8))}</a>`
+        : escapeHtml(r.id.slice(0, 8));
+      return `
+        <tr>
+          <td style="padding:6px 8px; border-bottom:1px solid #e5e5e5; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px;">${link}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #e5e5e5; font-size:13px;">${escapeHtml(r.status)}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #e5e5e5; font-size:13px;">${escapeHtml(r.location)}</td>
+          <td style="padding:6px 8px; border-bottom:1px solid #e5e5e5; font-size:13px; text-align:right; font-variant-numeric: tabular-nums;">${r.minutesStuck} min</td>
+        </tr>`;
+    })
+    .join('');
+
+  const inner = `
+    <p style="font-size:15px; margin:0 0 12px 0;">
+      ${n === 1 ? 'A quote request' : `${n} quote requests`} ${n === 1 ? 'has' : 'have'} been parked past
+      ${n === 1 ? 'its' : 'their'} SLA threshold. This usually means a
+      webhook drop, a Vapi hang, or send-reports isn't firing.
+    </p>
+    <p style="font-size:13px; margin:0 0 16px 0; color:#6b7280;">
+      Thresholds: <code>paid</code> &gt; 15m, <code>calling</code> &gt; 25m, <code>processing</code> &gt; 60m.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e5e5e5; border-radius:8px;">
+      <thead>
+        <tr style="background:#f9fafb;">
+          <th style="padding:6px 8px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280;">ID</th>
+          <th style="padding:6px 8px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280;">Status</th>
+          <th style="padding:6px 8px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280;">Location</th>
+          <th style="padding:6px 8px; text-align:right; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280;">Stuck for</th>
+        </tr>
+      </thead>
+      <tbody>${rowHtml}</tbody>
+    </table>
+    <p style="font-size:12px; margin:18px 0 0 0; color:#6b7280;">
+      Click any ID to open it in /admin. Common fixes:
+      check Vapi server.url is alive, check Resend isn't bouncing,
+      tail the cron run history.
+    </p>
+  `;
+
+  const text = [
+    `EvenQuote ops alert: ${n} stuck request${n === 1 ? '' : 's'}`,
+    '',
+    'Thresholds: paid >15m, calling >25m, processing >60m.',
+    '',
+    ...input.rows.map(
+      (r) =>
+        `  ${r.id.slice(0, 8)}  ${r.status.padEnd(11)}  ${r.location.padEnd(28)}  ${r.minutesStuck} min` +
+        (r.adminUrl ? `\n    ${r.adminUrl}` : '')
+    ),
+    '',
+    'Common fixes: check Vapi server.url, check Resend bounces, tail cron run history.',
+  ].join('\n');
+
+  return { subject, html: htmlShell(inner), text };
 }
 
 // ─── 2. Contact release → business ──────────────────────────────────

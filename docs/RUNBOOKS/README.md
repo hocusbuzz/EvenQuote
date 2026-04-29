@@ -10,6 +10,7 @@ recipe-following, not for being clever.
 
 | Scenario | When you'd reach for this |
 | --- | --- |
+| [soft-launch.md](./soft-launch.md) | First production deploy. Steps 1–13, in order. Read this before pushing the green button. |
 | [stripe-webhook-down.md](./stripe-webhook-down.md) | Customers paid but never got a magic link or their request didn't progress past `pending_payment`. |
 | [vapi-call-timed-out.md](./vapi-call-timed-out.md) | Quote requests stuck in `calling` long past their SLA, or per-business calls in `failed`/`no_answer` storm. |
 | [supabase-503.md](./supabase-503.md) | `/api/health` returns 503. Site appears up but every server action throws. |

@@ -15,6 +15,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { verifyVapiWebhook } from '@/lib/calls/vapi';
 import { applyEndOfCall, type VapiEndOfCallReport } from '@/lib/calls/apply-end-of-call';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('vapi/webhook');
 
@@ -58,6 +59,12 @@ export async function POST(req: Request) {
     }
   } catch (err) {
     log.error('handler failed', { err, vapiCallId });
+    // Route to the error tracker as well — applyEndOfCall is the
+    // transcript-to-quote pipeline and a silent failure here means a
+    // paid user gets an empty report. No-op until Sentry's DSN lands.
+    captureException(err, {
+      tags: { route: 'vapi/webhook', vapiCallId },
+    });
     // Return 500 so Vapi retries. applyEndOfCall is idempotent, so safe.
     return new Response('handler error', { status: 500 });
   }

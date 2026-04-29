@@ -20,6 +20,7 @@
 //     validation.
 
 import { z } from 'zod';
+import { EnvEmailSchema } from '@/lib/forms/moving-intake';
 
 const BooleanString = z
   .union([z.literal('true'), z.literal('false')])
@@ -51,7 +52,11 @@ const ServerEnvSchema = z.object({
   // RESEND_FROM is often a full "Name <email@domain>" string, not a bare
   // email — don't tighten to z.email().
   RESEND_FROM: z.string().optional(),
-  EVENQUOTE_SUPPORT_EMAIL: z.string().email().optional(),
+  // R46(b): use the shared EnvEmailSchema primitive (deliberately
+  // loose — no .trim()/.toLowerCase() — so an operator typo like
+  // "  Foo@Bar.com  " fails validation rather than getting silently
+  // normalized in production).
+  EVENQUOTE_SUPPORT_EMAIL: EnvEmailSchema.optional(),
 
   // ─── Quote extraction (optional) ───────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -60,10 +65,12 @@ const ServerEnvSchema = z.object({
   // ─── Business ingest (optional) ────────────────────────────────
   GOOGLE_PLACES_API_KEY: z.string().optional(),
 
-  // ─── Call batch size (optional; default 5) ─────────────────────
+  // ─── Call batch size (optional; default 10) ────────────────────
   // Parsed with a coercion + bounds check so a bad value fails at boot
   // rather than at first enqueue. Max 20 — Vapi's per-request cost and
-  // our cron retry design don't make sense above this.
+  // our cron retry design don't make sense above this. Default bumped
+  // from 5 → 10 after pre-launch product sizing: 5 was too thin a
+  // sample for a "side-by-side comparison" report to feel comprehensive.
   CALL_BATCH_SIZE: z
     .string()
     .optional()
@@ -117,16 +124,57 @@ export function validateServerEnv(): ServerEnv {
   // ─── Production-only required vars ──────────────────────────────
   // These are optional at schema level (for dev ergonomics) but MUST
   // be present in production. Bail loudly if missing.
+  //
+  // Why each one is here:
+  //
+  //   • RESEND_API_KEY / RESEND_FROM — sendEmail() degrades to a
+  //     simulated fake-id success when these are missing. The cron
+  //     and contact-release paths only check `.ok`, so a prod
+  //     without Resend silently stamps reports as delivered + flips
+  //     contact_released_at while no email ships.
+  //
+  //   • VAPI_* (R47.4) — startOutboundCall() degrades to a sim_*
+  //     fake call id when these are missing. The end-of-call webhook
+  //     never fires, but the engine has already incremented
+  //     total_calls_made and the request advances toward 'processing'
+  //     on synthetic data. Customers paid us, no calls happened.
+  //
+  //   • TEST_OVERRIDE_PHONE — fail loudly if this leaks into prod.
+  //     The dialer uses it to redirect every contractor call. With
+  //     it set in prod, every customer's calls go to one number —
+  //     usually the developer's phone. Worst-possible failure mode.
   if (_cached.NODE_ENV === 'production') {
     const missingInProd: string[] = [];
     if (!_cached.STRIPE_SECRET_KEY) missingInProd.push('STRIPE_SECRET_KEY');
     if (!_cached.STRIPE_WEBHOOK_SECRET) missingInProd.push('STRIPE_WEBHOOK_SECRET');
     if (!_cached.CRON_SECRET) missingInProd.push('CRON_SECRET');
     if (!_cached.NEXT_PUBLIC_APP_URL) missingInProd.push('NEXT_PUBLIC_APP_URL');
+    if (!_cached.RESEND_API_KEY) missingInProd.push('RESEND_API_KEY');
+    if (!_cached.RESEND_FROM) missingInProd.push('RESEND_FROM');
+
+    // Vapi quartet — all four needed for real calls. Missing any
+    // single one degrades startOutboundCall() into simulation, which
+    // is what we're hard-disabling in prod.
+    if (!_cached.VAPI_API_KEY) missingInProd.push('VAPI_API_KEY');
+    if (!_cached.VAPI_ASSISTANT_ID) missingInProd.push('VAPI_ASSISTANT_ID');
+    if (!_cached.VAPI_PHONE_NUMBER_ID) missingInProd.push('VAPI_PHONE_NUMBER_ID');
+    if (!_cached.VAPI_WEBHOOK_SECRET) missingInProd.push('VAPI_WEBHOOK_SECRET');
 
     if (missingInProd.length) {
       throw new Error(
         `Production env missing required vars: ${missingInProd.join(', ')}`
+      );
+    }
+
+    // Hard refuse: TEST_OVERRIDE_PHONE in prod. We read directly from
+    // process.env (not the cached schema) so this guard fires even if
+    // the schema added it as optional later.
+    if (process.env.TEST_OVERRIDE_PHONE) {
+      throw new Error(
+        'TEST_OVERRIDE_PHONE is set in production. ' +
+          'This redirects every contractor call to one number — ' +
+          'remove from your prod env immediately. ' +
+          'See lib/calls/vapi.ts for context.'
       );
     }
   }
@@ -181,11 +229,12 @@ export function featureReadiness(): {
 /**
  * Parse CALL_BATCH_SIZE with a sane default. Bounds are enforced by the
  * schema above; if that validation passed, the coerce-to-number here is
- * safe. Default 5 matches the original inline default in queue/enqueue-calls.
+ * safe. Default 10 — sized to produce a comparison report that feels
+ * comprehensive without blowing per-request Vapi cost.
  */
 export function getCallBatchSize(): number {
   const raw = process.env.CALL_BATCH_SIZE;
-  if (!raw) return 5;
+  if (!raw) return 10;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 1 && n <= 20 ? Math.floor(n) : 5;
+  return Number.isFinite(n) && n >= 1 && n <= 20 ? Math.floor(n) : 10;
 }

@@ -440,8 +440,8 @@ export function ReviewStep({
         Look right?
       </h2>
       <p className="mt-2 text-muted-foreground">
-        Double-check before we start calling. After this you'll pay $9.99 and we'll begin
-        dialing within minutes.
+        Double-check before we start calling. After this you'll pay $9.99 (+ tax if applicable)
+        and we'll begin dialing within minutes.
       </p>
 
       <div className="mt-8 space-y-5">

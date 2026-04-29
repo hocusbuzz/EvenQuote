@@ -37,11 +37,13 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import type Stripe from 'stripe';
-import { getStripe } from '@/lib/stripe/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { sendPaymentMagicLink } from '@/lib/actions/post-payment';
 import { enqueueQuoteCalls } from '@/lib/queue/enqueue-calls';
+import { seedBusinessesForRequest } from '@/lib/ingest/seed-on-demand';
 import { createLogger } from '@/lib/logger';
+import { verifyStripeWebhook } from '@/lib/security/stripe-auth';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('stripe/webhook');
 
@@ -56,30 +58,15 @@ type ErrResponse = { error: string };
 export async function POST(
   req: NextRequest
 ): Promise<NextResponse<OkResponse | ErrResponse>> {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret) {
-    log.error('STRIPE_WEBHOOK_SECRET is not set');
-    return NextResponse.json({ error: 'Webhook misconfigured' }, { status: 500 });
-  }
-
-  const signature = req.headers.get('stripe-signature');
-  if (!signature) {
-    return NextResponse.json({ error: 'Missing stripe-signature header' }, { status: 400 });
-  }
-
-  // Must be the raw body. Do NOT parse before verification.
+  // Must be the raw body. Do NOT parse before verification. The helper
+  // delegates HMAC verification to the Stripe SDK's constructEvent,
+  // which runs constant-time comparison internally.
   const raw = await req.text();
-
-  const stripe = getStripe();
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(raw, signature, secret);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'signature verification failed';
-    log.error('signature verification failed', { err: msg });
-    // 400 so Stripe stops retrying tampered/bad events rather than hammering us.
-    return NextResponse.json({ error: `Invalid signature: ${msg}` }, { status: 400 });
+  const auth = await verifyStripeWebhook(req, raw);
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
+  const { event } = auth;
 
   // ── Route on event type ────────────────────────────────────────────
   try {
@@ -120,6 +107,11 @@ export async function POST(
     // Anything unexpected: 500 so Stripe retries. We logged it below in
     // the handler, so this is a hook for correlation.
     log.error('handler threw', { err });
+    // Route to the error tracker as well as the structured log. No-op
+    // when Sentry isn't wired — additive until the DSN lands.
+    captureException(err, {
+      tags: { route: 'stripe/webhook', eventType: event.type, eventId: event.id },
+    });
     return NextResponse.json({ error: 'Handler error' }, { status: 500 });
   }
 }
@@ -266,15 +258,120 @@ async function handleCheckoutCompleted(
       });
     } catch (err) {
       log.error('magic link send failed', { err, requestId });
+      // Paid user can't sign in to claim — high-visibility surface for
+      // the error tracker. Tag with the site so alerts route to the
+      // right on-call mental model. No-op until Sentry DSN lands.
+      captureException(err, {
+        tags: { route: 'stripe/webhook', site: 'magic-link', requestId },
+      });
     }
   } else {
     log.warn('no contact email found for magic link', { requestId });
   }
 
+  // 5. On-demand business seeding. Fires Google Places searchText
+  //    biased to the request's origin coords so the call engine has a
+  //    fresh, geo-relevant pool to pick from. Best-effort: if Places
+  //    is rate-limited, down, or returns zero rows, the engine still
+  //    runs against whatever's in the DB (manual ingest, prior seeds).
+  //    Idempotent via quote_requests.businesses_seeded_at — a webhook
+  //    replay won't double-charge the Places API.
   try {
-    await enqueueQuoteCalls({ quoteRequestId: requestId });
+    const seed = await seedBusinessesForRequest({ quoteRequestId: requestId });
+    if (seed.ok) {
+      log.info('on-demand seed result', { requestId, seed });
+    } else {
+      log.warn('on-demand seed soft-failed', { requestId, reason: seed.reason });
+    }
+  } catch (err) {
+    log.error('seedBusinessesForRequest threw', { err, requestId });
+    captureException(err, {
+      tags: { route: 'stripe/webhook', site: 'seed-on-demand', requestId },
+    });
+  }
+
+  try {
+    const enq = await enqueueQuoteCalls({ quoteRequestId: requestId });
+
+    // R47.5: handle the {ok:true, advanced:false} soft-failure case.
+    //
+    // enqueueQuoteCalls returns this when:
+    //   • runCallBatch flipped status='failed' because no businesses
+    //     matched any tier (zip → radius → state)
+    //   • batch was already claimed by another tick
+    //   • selectBusinesses returned 0 + dispatched 0 for any other
+    //     non-throwing reason
+    //
+    // Pre-fix: the webhook logged success and returned. The customer's
+    // payment was recorded; the request sat in `status='failed'`; the
+    // send-reports cron only scans `status='processing'`, so the row
+    // never auto-refunded and ops only learned about it from a
+    // support ticket. Codex caught this on re-review.
+    //
+    // Fix: convert the row into the exact same shape that send-reports'
+    // zero-quote refund path already handles — `status='processing'`
+    // with zero quotes collected and zero calls planned. The cron's
+    // next tick (≤5 min) processes it through the existing refund
+    // logic: Stripe refund + apology email with refundOutcome='issued'.
+    // No new code path, no duplicate refund logic, leverages the
+    // tested pipeline. Capture for ops visibility regardless.
+    if (enq.ok && !enq.advanced) {
+      log.error('enqueue advanced:false — paid request stranded; routing to refund', {
+        requestId,
+        reason: enq.reason,
+      });
+      captureException(
+        new Error(`enqueue advanced:false: ${enq.reason ?? 'unknown'}`),
+        {
+          tags: {
+            route: 'stripe/webhook',
+            site: 'enqueue-calls',
+            requestId,
+          },
+        }
+      );
+
+      // Park the row in 'processing' so send-reports picks it up
+      // and runs the zero-quote refund path. We deliberately set
+      // total_businesses_to_call=0 + total_calls_completed=0 so the
+      // status-advance invariant in apply_call_end RPC stays
+      // consistent: report_data will record refund_outcome='issued'
+      // and the customer gets a clear "we couldn't reach anyone +
+      // here's your refund" email instead of silence.
+      const admin2 = createAdminClient();
+      const { error: parkErr } = await admin2
+        .from('quote_requests')
+        .update({
+          status: 'processing',
+          total_businesses_to_call: 0,
+          total_calls_completed: 0,
+          total_quotes_collected: 0,
+        })
+        .eq('id', requestId);
+      if (parkErr) {
+        log.error('failed to park request for refund', {
+          requestId,
+          err: parkErr,
+        });
+        captureException(
+          new Error(`park-for-refund: ${parkErr.message}`),
+          {
+            tags: {
+              route: 'stripe/webhook',
+              site: 'enqueue-calls',
+              requestId,
+            },
+          }
+        );
+      }
+    }
   } catch (err) {
     log.error('enqueue calls failed', { err, requestId });
+    // Paid user ends up with no calls placed — the exact failure mode
+    // that destroys trust. Ship to error tracker.
+    captureException(err, {
+      tags: { route: 'stripe/webhook', site: 'enqueue-calls', requestId },
+    });
   }
 
   return 'Processed';

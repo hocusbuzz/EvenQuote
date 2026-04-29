@@ -22,6 +22,13 @@ describe('validateServerEnv', () => {
     delete process.env.STRIPE_WEBHOOK_SECRET;
     delete process.env.CRON_SECRET;
     delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.RESEND_API_KEY;
+    delete process.env.RESEND_FROM;
+    delete process.env.VAPI_API_KEY;
+    delete process.env.VAPI_ASSISTANT_ID;
+    delete process.env.VAPI_PHONE_NUMBER_ID;
+    delete process.env.VAPI_WEBHOOK_SECRET;
+    delete process.env.TEST_OVERRIDE_PHONE;
   });
 
   it('parses a valid development env', async () => {
@@ -61,9 +68,58 @@ describe('validateServerEnv', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec_xxx',
       CRON_SECRET: 'a-long-enough-secret-value',
       NEXT_PUBLIC_APP_URL: 'https://evenquote.com',
+      // RESEND_* are prod-required as of the P1-2 fix — without them
+      // sendEmail() silently returns simulated-success and callers (e.g.
+      // release-contact, report dispatch) mark work as delivered even
+      // though no mail went out.
+      RESEND_API_KEY: 're_xxx',
+      RESEND_FROM: 'no-reply@evenquote.com',
+      // VAPI_* are prod-required as of R47.4 — without them
+      // startOutboundCall() silently returns sim_* fake call ids and
+      // the engine advances paid requests on synthetic data.
+      VAPI_API_KEY: 'vapi-prod-key',
+      VAPI_ASSISTANT_ID: 'asst_xxx',
+      VAPI_PHONE_NUMBER_ID: 'pn_xxx',
+      VAPI_WEBHOOK_SECRET: 'vapi-secret',
     });
+    delete process.env.TEST_OVERRIDE_PHONE;
     const mod = await freshImport();
     expect(() => mod.validateServerEnv()).not.toThrow();
+  });
+
+  it('rejects production env that lists Vapi as missing', async () => {
+    Object.assign(process.env, REQUIRED, {
+      NODE_ENV: 'production',
+      STRIPE_SECRET_KEY: 'sk_live_xxx',
+      STRIPE_WEBHOOK_SECRET: 'whsec_xxx',
+      CRON_SECRET: 'a-long-enough-secret-value',
+      NEXT_PUBLIC_APP_URL: 'https://evenquote.com',
+      RESEND_API_KEY: 're_xxx',
+      RESEND_FROM: 'no-reply@evenquote.com',
+      // VAPI_* deliberately omitted.
+    });
+    delete process.env.TEST_OVERRIDE_PHONE;
+    const mod = await freshImport();
+    expect(() => mod.validateServerEnv()).toThrow(/VAPI_API_KEY/);
+  });
+
+  it('refuses to boot when TEST_OVERRIDE_PHONE is set in production', async () => {
+    Object.assign(process.env, REQUIRED, {
+      NODE_ENV: 'production',
+      STRIPE_SECRET_KEY: 'sk_live_xxx',
+      STRIPE_WEBHOOK_SECRET: 'whsec_xxx',
+      CRON_SECRET: 'a-long-enough-secret-value',
+      NEXT_PUBLIC_APP_URL: 'https://evenquote.com',
+      RESEND_API_KEY: 're_xxx',
+      RESEND_FROM: 'no-reply@evenquote.com',
+      VAPI_API_KEY: 'vapi-prod-key',
+      VAPI_ASSISTANT_ID: 'asst_xxx',
+      VAPI_PHONE_NUMBER_ID: 'pn_xxx',
+      VAPI_WEBHOOK_SECRET: 'vapi-secret',
+      TEST_OVERRIDE_PHONE: '+15555550100',
+    });
+    const mod = await freshImport();
+    expect(() => mod.validateServerEnv()).toThrow(/TEST_OVERRIDE_PHONE/);
   });
 
   it('rejects a non-numeric CALL_BATCH_SIZE', async () => {
@@ -86,10 +142,10 @@ describe('validateServerEnv', () => {
 });
 
 describe('getCallBatchSize', () => {
-  it('defaults to 5 when unset', async () => {
+  it('defaults to 10 when unset', async () => {
     delete process.env.CALL_BATCH_SIZE;
     const mod = await import('./env');
-    expect(mod.getCallBatchSize()).toBe(5);
+    expect(mod.getCallBatchSize()).toBe(10);
   });
 
   it('parses and floors a valid value', async () => {
@@ -98,10 +154,10 @@ describe('getCallBatchSize', () => {
     expect(mod.getCallBatchSize()).toBe(7);
   });
 
-  it('falls back to 5 on an unparseable runtime value', async () => {
+  it('falls back to 10 on an unparseable runtime value', async () => {
     process.env.CALL_BATCH_SIZE = 'garbage';
     const mod = await import('./env');
-    expect(mod.getCallBatchSize()).toBe(5);
+    expect(mod.getCallBatchSize()).toBe(10);
   });
 });
 

@@ -52,6 +52,12 @@ type AdminOpts = {
   businessRow?: Record<string, unknown> | null;
   businessErr?: boolean;
   existingReleaseId?: string | null;
+  /**
+   * Simulates the pre-send defense-in-depth check hitting a prior
+   * successful audit row (email_send_id IS NOT NULL) whose stamp was
+   * never written. The action should short-circuit as already-released.
+   */
+  priorSendRow?: { id: string; email_send_id: string } | null;
   auditInsertErr?: boolean;
   stampErr?: boolean;
 };
@@ -65,16 +71,27 @@ function mockAdmin(opts: AdminOpts = {}) {
       : null,
     error: null,
   });
+  // Pre-send defense-in-depth lookup: .select().eq().not('email_send_id','is',null).maybeSingle()
+  const priorSendLookup = vi.fn().mockResolvedValue({
+    data: opts.priorSendRow ?? null,
+    error: null,
+  });
 
   vi.doMock('@/lib/supabase/admin', () => ({
     createAdminClient: () => ({
       from: (table: string) => {
         if (table === 'quote_contact_releases') {
           return {
-            // idempotent short-circuit path
+            // Two select chains land here:
+            //   1. owned.contact_released_at=true path: .select().eq().maybeSingle()
+            //   2. pre-send double-send check:          .select().eq().not().maybeSingle()
+            // The presence/absence of .not() tells them apart.
             select: () => ({
               eq: () => ({
                 maybeSingle: existingReleaseLookup,
+                not: () => ({
+                  maybeSingle: priorSendLookup,
+                }),
               }),
             }),
             // audit insert path (followed by .select().single() on happy
@@ -110,10 +127,21 @@ function mockAdmin(opts: AdminOpts = {}) {
             update: (row: Record<string, unknown>) => {
               updateSpy(row);
               return {
-                eq: () =>
-                  Promise.resolve({
-                    error: opts.stampErr ? { message: 'stamp err' } : null,
-                  }),
+                eq: () => ({
+                  // update().eq()        — used by the happy-path stamp.
+                  // update().eq().is()   — used by the P2-1 repair stamp
+                  //                        (guards "only if contact_released_at IS NULL").
+                  // Both terminate with a Promise resolution; the repair
+                  // path adds .is() in between but we want both to resolve
+                  // the same way.
+                  then: (
+                    resolve: (v: { error: { message: string } | null }) => unknown
+                  ) => resolve({ error: opts.stampErr ? { message: 'stamp err' } : null }),
+                  is: () =>
+                    Promise.resolve({
+                      error: opts.stampErr ? { message: 'stamp err' } : null,
+                    }),
+                }),
               };
             },
           };
@@ -376,6 +404,41 @@ describe('releaseContactToBusiness', () => {
     // Quote stamped with contact_released_at.
     expect(updateSpy).toHaveBeenCalledOnce();
     expect(updateSpy.mock.calls[0][0].contact_released_at).toBeTruthy();
+  });
+
+  it('defense-in-depth: a prior successful send (contact_released_at NULL but email_send_id set) does NOT re-send PII', async () => {
+    // Regression for GPT Codex P2-1: the happy path writes the audit row
+    // BEFORE stamping quotes.contact_released_at. If the stamp fails, a
+    // retry used to see contact_released_at=NULL and send the PII email
+    // a second time. Fix: the pre-send check queries
+    // quote_contact_releases for a row with email_send_id IS NOT NULL
+    // and short-circuits.
+    mockSsr({ id: 'user-1' }, { id: 'quote-1', contact_released_at: null });
+    const { insertSpy, updateSpy } = mockAdmin({
+      // A prior send landed but the stamp never ran.
+      priorSendRow: { id: 'rel-prior', email_send_id: 'eml-prior' },
+      // Populate the rest so we'd fall through if the check were missing.
+      quoteRow: QUOTE_ROW,
+      requestRow: REQUEST_ROW,
+      businessRow: BUSINESS_ROW,
+    });
+    const { sendSpy } = mockResend({ ok: true, id: 'eml-new', simulated: false });
+    const { releaseContactToBusiness } = await import('./release-contact');
+    const res = await releaseContactToBusiness('quote-1');
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.alreadyReleased).toBe(true);
+      expect(res.releaseId).toBe('rel-prior');
+    }
+    // The important invariant: no new email was sent, no new audit row.
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(insertSpy).not.toHaveBeenCalled();
+    // Best-effort stamp repair fires — it's ok if it's called, but it
+    // must target contact_released_at only (and use .is(null) to avoid
+    // clobbering a subsequent real stamp).
+    if (updateSpy.mock.calls.length > 0) {
+      expect(updateSpy.mock.calls[0][0]).toHaveProperty('contact_released_at');
+    }
   });
 
   it('defense-in-depth: rejects when the quote_request user_id mismatches', async () => {

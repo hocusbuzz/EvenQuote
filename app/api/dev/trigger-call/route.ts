@@ -2,8 +2,10 @@
 // (or simulated) Vapi call against your seeded businesses.
 //
 // Lives under /api/dev/* on purpose: this route HARD-REFUSES outside
-// development. The check is two-layered (NODE_ENV + the optional dev
-// token below) so a misconfigured prod deploy still won't expose it.
+// development. The two-layer auth (NODE_ENV gate + optional
+// DEV_TRIGGER_TOKEN) lives in lib/security/dev-token-auth.ts — if
+// you touch the auth behavior, edit it there so the sibling
+// backfill-call route stays in lockstep.
 //
 // Usage (dev server running on :3000):
 //
@@ -27,6 +29,8 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runCallBatch } from '@/lib/calls/engine';
+import { assertDevToken } from '@/lib/security/dev-token-auth';
+import { assertRateLimit } from '@/lib/security/rate-limit-auth';
 
 // Force Node runtime — runCallBatch + service-role client need Node, not edge.
 export const runtime = 'nodejs';
@@ -76,30 +80,26 @@ const DEFAULTS: Record<string, Defaults> = {
 };
 
 export async function GET(req: Request) {
-  // ── Layer 1: NODE_ENV gate ──
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json(
-      { ok: false, error: 'Dev trigger is disabled in production' },
-      { status: 404 }
-    );
-  }
+  // Centralized two-layer auth: NODE_ENV gate (404 in prod, no probe
+  // signal) + optional DEV_TRIGGER_TOKEN (401 on mismatch, constant-
+  // time compared). See lib/security/dev-token-auth.ts.
+  const deny = assertDevToken(req);
+  if (deny) return deny;
 
-  // ── Layer 2: optional shared-secret gate ──
-  // If DEV_TRIGGER_TOKEN is set in .env.local, require it as ?token=…
-  // Useful when running the dev server on a network where someone else
-  // could hit localhost (e.g. ngrok, cloudflared trycloudflare).
-  const expectedToken = process.env.DEV_TRIGGER_TOKEN?.trim();
+  // R48(h) — Defense-in-depth rate limit AFTER assertDevToken so the
+  // no-probe-in-prod property is preserved (a flooder hitting /api/dev/*
+  // in prod sees the same 404 they always saw, never a 429). Inside
+  // dev-mode-with-valid-token the limiter still cuts a runaway script
+  // dispatching real Vapi calls. 30/60s is generous for hand-testing
+  // (a fast tab-reload cycle) and tight enough to stop a leaked token.
+  const rateLimitDeny = assertRateLimit(req, {
+    prefix: 'dev-trigger-call',
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (rateLimitDeny) return rateLimitDeny;
+
   const url = new URL(req.url);
-  if (expectedToken) {
-    const provided = url.searchParams.get('token') ?? '';
-    if (provided !== expectedToken) {
-      return NextResponse.json(
-        { ok: false, error: 'Invalid or missing ?token= for DEV_TRIGGER_TOKEN' },
-        { status: 401 }
-      );
-    }
-  }
-
   const categorySlug = (url.searchParams.get('category') ?? 'moving').toLowerCase();
   const defaults = DEFAULTS[categorySlug];
   if (!defaults) {

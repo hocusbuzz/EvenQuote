@@ -26,8 +26,32 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { startOutboundCall } from '@/lib/calls/vapi';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('cron/retry-failed-calls');
+
+// ─────────────────────────────────────────────────────────────────────
+// Canonical Sentry tag shape for this module:
+//
+//   { lib: 'cron-retry-failed-calls', reason: CronRetryReason, ... }
+//
+// Prior to R27 this file had NO Sentry capture. Two genuinely silent
+// failure paths:
+//
+//  • candidate query errors returned `{ ok:false, notes:[...] }` —
+//    the route handler did not throw, so the route-level try/catch
+//    did not fire. Result: a Postgres permission error would cause
+//    the retry worker to silently no-op on every tick.
+//
+//  • apply_call_end for an exhausted row failed → the row's request
+//    stays stuck in status='calling' forever and the send-reports cron
+//    never picks it up. This is the exact "stuck-batch bug" the code's
+//    own comments call out; the test block below locks the capture.
+//
+// The reason values are allow-listed and enforced by a regression-
+// guard test in lib/cron/retry-failed-calls.test.ts.
+// ─────────────────────────────────────────────────────────────────────
+export type CronRetryReason = 'candidateQueryFailed' | 'applyCallEndFailed';
 
 // How many rows to process per run. Keeps a hot retry loop bounded and
 // lets a 60s-limited serverless invocation finish comfortably.
@@ -72,10 +96,11 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
     Date.now() - 24 * 60 * 60 * 1000
   ).toISOString();
 
-  // Candidates: dispatch-failed rows within the last 24h, retry_count<3,
-  // and either never-retried OR retried more than THROTTLE_MINUTES ago.
-  // We fetch the joined business phone/name and the request's intake_data
-  // in the same round-trip to keep the loop cheap.
+  // Candidates: dispatch-failed rows within the last 24h, retry_count<1
+  // (cost control — max 2 total attempts per business: the initial
+  // dispatch plus one retry), and either never-retried OR retried more
+  // than THROTTLE_MINUTES ago. We fetch the joined business phone/name
+  // and the request's intake_data in the same round-trip.
   const { data: rows, error } = await admin
     .from('calls')
     .select(`
@@ -90,12 +115,25 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
     `)
     .eq('status', 'failed')
     .is('started_at', null)
-    .lt('retry_count', 3)
+    .lt('retry_count', 1)
     .gte('created_at', windowStartIso)
     .order('last_retry_at', { ascending: true, nullsFirst: true })
     .limit(MAX_PER_RUN);
 
   if (error) {
+    // Silent-failure guard: prior to R27 this branch returned ok:false
+    // with only the .notes array to surface the Postgres error. The
+    // route handler does not re-throw on ok:false (it returns JSON),
+    // so Sentry never saw it. A 403 from Supabase (RLS drift / role
+    // rotation) or a 42P01 (table rename) could no-op the retry worker
+    // forever with zero pages.
+    log.error('candidate query failed', { err: error });
+    captureException(new Error(error.message), {
+      tags: {
+        lib: 'cron-retry-failed-calls',
+        reason: 'candidateQueryFailed',
+      },
+    });
     return {
       ok: false,
       scanned: 0,
@@ -134,6 +172,47 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
 
     retried += 1;
     const retryStartedAt = new Date().toISOString();
+    const newRetryCount = row.retry_count + 1;
+
+    // R47.4: pre-mark the row BEFORE dialing.
+    //
+    // Old order (dial → success path → write retry_count) had a hole:
+    // if the dial succeeded but the row update failed, the row stayed
+    // in `status='failed'` with retry_count unchanged, AND the throttle
+    // (last_retry_at) wasn't bumped — so the next cron tick re-dialed
+    // the SAME contractor. Vapi already accepted call #1 and was
+    // ringing the contractor; we'd start call #2 right behind it.
+    //
+    // New order: bump retry_count + last_retry_at BEFORE dispatch.
+    // This serves two roles:
+    //   • Throttle gate: even on a worst-case "dispatch fired but
+    //     every subsequent write failed" scenario, the next cron
+    //     pass sees last_retry_at within the throttle window and
+    //     skips the row.
+    //   • Cap enforcement: retry_count is incremented even if the
+    //     dispatch crashes mid-flight, so a row can't redial forever
+    //     in a stuck-loop where the dial keeps timing out + the
+    //     post-write fails.
+    //
+    // Cost: if the pre-mark write itself fails, we bail without
+    // dialing — better than a double-dial. The row stays unchanged
+    // and the next tick retries.
+    {
+      const { error: preMarkErr } = await admin
+        .from('calls')
+        .update({
+          retry_count: newRetryCount,
+          last_retry_at: retryStartedAt,
+        })
+        .eq('id', row.id)
+        .eq('retry_count', row.retry_count); // CAS guard against concurrent runs
+      if (preMarkErr) {
+        notes.push(
+          `call ${row.id}: pre-mark write failed, skipping dispatch: ${preMarkErr.message}`
+        );
+        continue;
+      }
+    }
 
     const dispatch = await startOutboundCall({
       toPhone: biz.phone,
@@ -143,55 +222,57 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
         quote_request_id: row.quote_request_id,
         call_id: row.id,
         business_id: row.business_id,
-        retry_attempt: String(row.retry_count + 1),
+        retry_attempt: String(newRetryCount),
       },
     });
 
     if (dispatch.ok) {
       succeeded += 1;
+      // retry_count + last_retry_at already stamped above; only need
+      // to flip status + persist the new vapi_call_id here.
       const { error: updErr } = await admin
         .from('calls')
         .update({
           status: 'in_progress',
           vapi_call_id: dispatch.vapiCallId,
           started_at: retryStartedAt,
-          retry_count: row.retry_count + 1,
-          last_retry_at: retryStartedAt,
         })
         .eq('id', row.id);
       if (updErr) {
-        notes.push(`call ${row.id}: dispatched but row update failed: ${updErr.message}`);
+        notes.push(
+          `call ${row.id}: dispatched but vapi_call_id persist failed: ${updErr.message}`
+        );
+        // Same orphan risk as engine.ts — the call is mid-flight on
+        // Vapi but we can't correlate the webhook back. The
+        // throttle gate above prevents a retry-loop double-dial.
       }
     } else {
       failed += 1;
-      // Keep status=failed; bump retry_count so we eventually cap out
-      // and stop re-trying. last_retry_at throttles the next attempt.
-      const newRetryCount = row.retry_count + 1;
-      const { error: updErr } = await admin
-        .from('calls')
-        .update({
-          retry_count: newRetryCount,
-          last_retry_at: retryStartedAt,
-        })
-        .eq('id', row.id);
-      if (updErr) {
-        notes.push(`call ${row.id}: retry failed and row update failed: ${updErr.message}`);
-      } else {
-        notes.push(`call ${row.id}: retry #${newRetryCount} failed: ${dispatch.error}`);
-      }
+      // Status stays 'failed'; retry_count + last_retry_at were
+      // bumped in the pre-mark above, so no further row write is
+      // needed for state on this branch.
+      notes.push(
+        `call ${row.id}: retry #${newRetryCount} failed: ${dispatch.error}`
+      );
 
-      // If this retry just exhausted our cap (now at 3), the row is
-      // permanently dead — no vapi_call_id, so the Vapi webhook will
-      // never fire for it, which means apply_call_end will never count
-      // it toward total_calls_completed. Without this, a single dead
-      // phone number strands the whole request in status='calling'
-      // forever and the Phase 9 report cron never picks it up.
+      // If this retry just exhausted our cap (now at 1 under the 2-
+      // total-attempts rule), the row is permanently dead — no
+      // vapi_call_id, so the Vapi webhook will never fire for it,
+      // which means apply_call_end will never count it toward
+      // total_calls_completed. Without this, a single dead phone
+      // number strands the whole request in status='calling' forever
+      // and the Phase 9 report cron never picks it up.
       //
       // Count the permanent failure here so the request can advance.
       // p_quote_inserted=false since dispatch never succeeded.
-      if (newRetryCount >= 3) {
+      if (newRetryCount >= 1) {
+        // p_call_id is the retry-exhausted call row itself. The RPC
+        // stamps its counters_applied_at atomically, so if this cron
+        // runs twice for the same row (shouldn't, but defense-in-depth)
+        // only the first tick bumps counters.
         const { error: applyErr } = await admin.rpc('apply_call_end', {
           p_request_id: row.quote_request_id,
+          p_call_id: row.id,
           p_quote_inserted: false,
         });
         if (applyErr) {
@@ -200,7 +281,19 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
           log.error('apply_call_end failed for exhausted row', {
             callId: row.id,
             requestId: row.quote_request_id,
-            err: applyErr.message,
+            err: applyErr,
+          });
+          // THE stuck-batch bug: exhausted retry without counter bump
+          // leaves the quote_request in status='calling' forever →
+          // send-reports never picks it up → customer paid, never got
+          // a report. Highest-value capture in this module.
+          captureException(new Error(applyErr.message), {
+            tags: {
+              lib: 'cron-retry-failed-calls',
+              reason: 'applyCallEndFailed',
+              callId: row.id,
+              quoteRequestId: row.quote_request_id,
+            },
           });
           notes.push(`call ${row.id}: apply_call_end after exhaustion failed: ${applyErr.message}`);
         } else {

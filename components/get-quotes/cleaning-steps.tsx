@@ -33,6 +33,7 @@ import { StepNav } from './step-nav';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
+import { AddressAutocomplete, type ParsedAddress } from './address-autocomplete';
 import {
   Select,
   SelectContent,
@@ -79,6 +80,25 @@ export function LocationStep({ onNext }: StepProps) {
     clearError(k as string);
   };
 
+  // Pick-from-Google handler — fills all four address fields plus
+  // lat/lng. The coords feed the on-demand business seeder + the
+  // radius selector. They're optional on the schema, so manual
+  // ("Use custom") entries that lack them still pass validation.
+  const handleAutocompletePick = (parsed: ParsedAddress) => {
+    if (parsed.address_line) update('address', parsed.address_line);
+    if (parsed.city) update('city', parsed.city);
+    if (parsed.state && (US_STATES as readonly string[]).includes(parsed.state)) {
+      update('state', parsed.state as (typeof US_STATES)[number]);
+    }
+    if (parsed.zip_code) update('zip', parsed.zip_code);
+    if (typeof parsed.latitude === 'number') {
+      setField('lat', parsed.latitude);
+    }
+    if (typeof parsed.longitude === 'number') {
+      setField('lng', parsed.longitude);
+    }
+  };
+
   return (
     <section>
       <h2 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
@@ -95,21 +115,26 @@ export function LocationStep({ onNext }: StepProps) {
           required
           error={errors.address}
         >
-          <Input
+          <AddressAutocomplete
             id="address"
             autoComplete="address-line1"
             value={draft.address ?? ''}
-            onChange={(e) => update('address', e.target.value)}
-            placeholder="123 Main St"
+            onChange={(v) => update('address', v)}
+            onSelectAddress={handleAutocompletePick}
+            placeholder="Start typing — we'll suggest addresses"
           />
         </FormField>
 
         <div className="grid gap-5 sm:grid-cols-[1fr_auto_auto]">
           <FormField label="City" htmlFor="city" required error={errors.city}>
-            <Input
+            <AddressAutocomplete
               id="city"
+              type="city"
+              autoComplete="address-level2"
               value={draft.city ?? ''}
-              onChange={(e) => update('city', e.target.value)}
+              onChange={(v) => update('city', v)}
+              onSelectAddress={handleAutocompletePick}
+              placeholder="San Diego"
             />
           </FormField>
 
@@ -144,12 +169,14 @@ export function LocationStep({ onNext }: StepProps) {
             error={errors.zip}
             className="sm:w-36"
           >
-            <Input
+            <AddressAutocomplete
               id="zip"
+              type="zip"
               inputMode="numeric"
               autoComplete="postal-code"
               value={draft.zip ?? ''}
-              onChange={(e) => update('zip', e.target.value)}
+              onChange={(v) => update('zip', v)}
+              onSelectAddress={handleAutocompletePick}
               placeholder="92101"
             />
           </FormField>
@@ -591,8 +618,8 @@ export function ReviewStep({ onBack, onSubmit, submitting }: StepProps) {
         Look right?
       </h2>
       <p className="mt-2 text-muted-foreground">
-        Double-check before we start calling. After this you'll pay $9.99 and we'll begin
-        dialing within minutes.
+        Double-check before we start calling. After this you'll pay $9.99 (+ tax if applicable)
+        and we'll begin dialing within minutes.
       </p>
 
       <div className="mt-8 space-y-5">

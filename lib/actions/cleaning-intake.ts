@@ -18,8 +18,16 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('submitCleaningIntake');
+
+// Canonical Sentry tag shape shared with intake.ts (moving). Keep
+// `IntakeReason` imported from that file? No — server-only modules and
+// a cross-import would create a circular dep through lib/forms. Locally
+// re-declare; the regression-guard tests in both files lock the same
+// value set so a drift between the two is caught at CI.
+export type IntakeReason = 'categoryLookupFailed' | 'insertFailed';
 
 export type SubmitResult =
   | { ok: true; requestId: string }
@@ -66,6 +74,15 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
 
   if (catErr || !category) {
     log.error('cleaning category not found', { err: catErr });
+    if (catErr) {
+      const msg =
+        catErr && typeof catErr === 'object' && 'message' in catErr
+          ? String((catErr as { message: unknown }).message)
+          : String(catErr);
+      captureException(new Error(`intake categoryLookupFailed: ${msg}`), {
+        tags: { lib: 'intake', reason: 'categoryLookupFailed', vertical: 'cleaning' },
+      });
+    }
     return { ok: false, error: 'Cleaning category is unavailable. Please try again.' };
   }
 
@@ -74,6 +91,9 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
 
   // 4. Insert. The cleaning address *is* the service location, so it
   //    goes straight onto the top-level city/state/zip_code columns.
+  //    lat/lng (when the user picked a Google prediction) get persisted
+  //    to origin_lat/origin_lng — used by the on-demand business seeder
+  //    and the radius selector. Nullable: manual entries lack coords.
   const { data: inserted, error: insertErr } = await admin
     .from('quote_requests')
     .insert({
@@ -84,12 +104,23 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
       city: data.city,
       state: data.state,
       zip_code: data.zip,
+      origin_lat: data.lat ?? null,
+      origin_lng: data.lng ?? null,
     })
     .select('id')
     .single();
 
   if (insertErr || !inserted) {
     log.error('insert failed', { err: insertErr, userId: user?.id ?? null });
+    const msg =
+      insertErr && typeof insertErr === 'object' && 'message' in insertErr
+        ? String((insertErr as { message: unknown }).message)
+        : insertErr
+          ? String(insertErr)
+          : 'insert returned no row';
+    captureException(new Error(`intake insertFailed: ${msg}`), {
+      tags: { lib: 'intake', reason: 'insertFailed', vertical: 'cleaning' },
+    });
     return { ok: false, error: 'Could not save your request. Please try again.' };
   }
 

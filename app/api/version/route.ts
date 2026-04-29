@@ -18,8 +18,29 @@
 //     cuts function invocations on hot-pinged endpoints.
 //   • Only env vars Vercel populates by default. No new secret config
 //     to maintain.
+//
+// ── Observability contract (R33 audit) ────────────────────────────
+// This route deliberately does NOT wire captureException on any
+// path. Reasoning:
+//   1. No error paths exist. Pure env-var read. The only branch is
+//      `vercelEnvironment()` falling through to `NODE_ENV`, and that
+//      has no throw surface.
+//   2. Probe frequency. Same rationale as /api/health — uptime
+//      monitors and rollback-verification scripts poll this at
+//      per-region frequency. Capturing on any synthetic error here
+//      would flood.
+//   3. Secrets boundary. The response body is literally commit SHAs
+//      and region names — no stack traces, no internal errors. A
+//      captureException site would be the ONLY way this route could
+//      accidentally forward an internal error string into the Sentry
+//      event stream; keeping zero capture sites keeps that boundary
+//      unambiguous.
+//
+// Regression-guards in route.test.ts lock this no-capture contract —
+// if a future maintainer wires captureException here, the tests fail.
 
 import { NextResponse } from 'next/server';
+import { getCommitSha, getCommitShort } from '@/lib/observability/version';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -33,13 +54,6 @@ type VersionResponse = {
   region: string | null;
 };
 
-function shortSha(sha: string | undefined): string {
-  if (!sha) return 'dev';
-  // 7 chars is the git --short default. Long enough to be unambiguous
-  // in any realistic repo, short enough to type from memory.
-  return sha.slice(0, 7);
-}
-
 function vercelEnvironment(): VersionResponse['environment'] {
   // VERCEL_ENV is one of 'production' | 'preview' | 'development' on
   // Vercel deployments; absent on local dev. Fall back to NODE_ENV.
@@ -49,10 +63,11 @@ function vercelEnvironment(): VersionResponse['environment'] {
 }
 
 export async function GET() {
-  const sha = process.env.VERCEL_GIT_COMMIT_SHA ?? 'dev';
   const body: VersionResponse = {
-    commit: sha,
-    commitShort: shortSha(process.env.VERCEL_GIT_COMMIT_SHA),
+    // Both fields go through lib/observability/version so /api/health
+    // and /api/version can't drift. Lockdown: version.consistency.test.ts.
+    commit: getCommitSha(),
+    commitShort: getCommitShort(),
     // Branch only populated on preview deploys (production deploys
     // are off main, but we don't want to assume).
     branch: process.env.VERCEL_GIT_COMMIT_REF ?? null,

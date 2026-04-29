@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { redactPII, fingerprintError } from './logger';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { redactPII, fingerprintError, createLogger } from './logger';
 
 describe('redactPII', () => {
   it('masks emails preserving first char and domain', () => {
@@ -175,5 +175,168 @@ describe('fingerprintError', () => {
     };
     const real = withStack('TypeError', shaped.stack);
     expect(fingerprintError(shaped)).toBe(fingerprintError(real));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-fingerprint wiring in createLogger().emit()
+//
+// Contract (what these tests lock):
+//   1. If ctx.err is a substantive value, the emitted payload carries a
+//      top-level `fingerprint` field (greppable by monitoring).
+//   2. Callers can override by setting ctx.fingerprint explicitly.
+//   3. null/undefined/empty-string err values do NOT auto-fingerprint.
+//   4. The fingerprint matches what fingerprintError(err) would return,
+//      guaranteeing the helper and the auto-wired path stay in sync.
+//   5. All four log levels (debug/info/warn/error) respect the contract.
+// ---------------------------------------------------------------------------
+
+describe('createLogger — auto-fingerprint', () => {
+  function captureEmit(
+    fn: () => void,
+    level: 'debug' | 'info' | 'warn' | 'error',
+  ): Record<string, unknown> {
+    const target =
+      level === 'error'
+        ? console.error
+        : level === 'warn'
+          ? console.warn
+          : level === 'debug'
+            ? console.debug
+            : console.log;
+    const method =
+      level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'debug' ? 'debug' : 'log';
+    const spy = vi.spyOn(console, method).mockImplementation(() => {});
+    try {
+      fn();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const firstArg = spy.mock.calls[0]?.[0];
+      expect(typeof firstArg).toBe('string');
+      return JSON.parse(firstArg as string);
+    } finally {
+      spy.mockRestore();
+      void target; // silence unused
+    }
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('adds a fingerprint at the top level when ctx.err is an Error', () => {
+    const log = createLogger('test');
+    const err = new Error('boom');
+    const payload = captureEmit(() => log.error('failed', { err }), 'error');
+    expect(payload).toHaveProperty('fingerprint');
+    expect(payload.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+    // Matches what the caller would get from fingerprintError directly.
+    expect(payload.fingerprint).toBe(fingerprintError(err));
+  });
+
+  it('adds a fingerprint on warn too (not just error)', () => {
+    const log = createLogger('test');
+    const err = new Error('subwarn');
+    const payload = captureEmit(() => log.warn('retrying', { err }), 'warn');
+    expect(payload.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('adds a fingerprint on info and debug too — any level with an err gets one', () => {
+    const log = createLogger('test');
+    const err = new Error('soft');
+    const infoPayload = captureEmit(() => log.info('continuing', { err }), 'info');
+    const debugPayload = captureEmit(() => log.debug('trace', { err }), 'debug');
+    expect(infoPayload.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+    expect(debugPayload.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('respects an explicit fingerprint set by the caller', () => {
+    const log = createLogger('test');
+    const payload = captureEmit(
+      () => log.error('failed', { err: new Error('x'), fingerprint: 'custom-id' }),
+      'error',
+    );
+    expect(payload.fingerprint).toBe('custom-id');
+  });
+
+  it('does NOT add a fingerprint when err is null', () => {
+    const log = createLogger('test');
+    const payload = captureEmit(() => log.error('failed', { err: null }), 'error');
+    expect(payload).not.toHaveProperty('fingerprint');
+  });
+
+  it('does NOT add a fingerprint when err is undefined', () => {
+    const log = createLogger('test');
+    const payload = captureEmit(() => log.error('failed', { err: undefined }), 'error');
+    expect(payload).not.toHaveProperty('fingerprint');
+  });
+
+  it('does NOT add a fingerprint when err is an empty string', () => {
+    // An empty-string err value would hash to the same degenerate id
+    // across unrelated call sites. Adding it would only add noise.
+    const log = createLogger('test');
+    const payload = captureEmit(() => log.error('failed', { err: '' }), 'error');
+    expect(payload).not.toHaveProperty('fingerprint');
+  });
+
+  it('does NOT add a fingerprint when ctx has no err key', () => {
+    const log = createLogger('test');
+    const payload = captureEmit(
+      () => log.error('failed', { userId: 'u1', requestId: 'r1' }),
+      'error',
+    );
+    expect(payload).not.toHaveProperty('fingerprint');
+  });
+
+  it('does NOT add a fingerprint when ctx is undefined', () => {
+    const log = createLogger('test');
+    const payload = captureEmit(() => log.error('no context at all'), 'error');
+    expect(payload).not.toHaveProperty('fingerprint');
+  });
+
+  it('fingerprints string err values too (consistent auto-wiring)', () => {
+    // Round 13 added auto-fingerprinting; Round 14 swept all call sites
+    // to pass the Error instance instead of `error.message`. Strings can
+    // still arrive (e.g. caught primitives, defensive call sites) — they
+    // fingerprint consistently for non-surprising behavior, but the hash
+    // doesn't carry stack-shape information so grouping is weaker.
+    const log = createLogger('test');
+    const payload = captureEmit(
+      () => log.error('failed', { err: 'some error message' }),
+      'error',
+    );
+    expect(payload.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('fingerprint survives JSON round-trip and stays stable across repeat calls', () => {
+    const log = createLogger('test');
+    // Build a stable-shaped error (fixed stack) so the fp is reproducible.
+    const err = new Error('msg');
+    err.name = 'TypeError';
+    err.stack = 'TypeError: x\n    at h (/p/lib/x.ts:42:9)';
+    const a = captureEmit(() => log.error('failed', { err }), 'error');
+    const b = captureEmit(() => log.error('failed', { err }), 'error');
+    expect(a.fingerprint).toBe(b.fingerprint);
+    expect(a.fingerprint).toBe(fingerprintError(err));
+  });
+
+  it('top-level fingerprint is emitted ABOVE ctx in the payload shape', () => {
+    // Structural: grep tools parsing JSON objects key-by-key (rare but
+    // some do) get fingerprint before the noisy ctx blob. Not a
+    // functional requirement but documents the intended shape.
+    const log = createLogger('test');
+    const payload = captureEmit(
+      () => log.error('failed', { err: new Error('x'), extra: 'data' }),
+      'error',
+    );
+    const keys = Object.keys(payload);
+    const fpIdx = keys.indexOf('fingerprint');
+    const ctxIdx = keys.indexOf('ctx');
+    expect(fpIdx).toBeGreaterThanOrEqual(0);
+    expect(ctxIdx).toBeGreaterThanOrEqual(0);
+    expect(fpIdx).toBeLessThan(ctxIdx);
   });
 });

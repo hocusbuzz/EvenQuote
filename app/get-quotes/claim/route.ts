@@ -24,8 +24,32 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('get-quotes/claim');
+
+// Canonical Sentry tag shape for this magic-link landing route.
+// Mirrors R26 cron route convention: `{route, reason, requestId}`.
+//
+// Reasons:
+//   - requestLoadFailed       → DB error on quote_requests select
+//   - quoteBackfillFailed     → quote_requests update errored after auth
+//
+// DELIBERATELY not captured:
+//   - missing-row (loadErr===null, data===null): request_id in URL was
+//     wrong, tampered with, or expired. User error, not server. Would
+//     flood on share-link misuse.
+//   - email mismatch: false-positive heavy — many users have two emails
+//     and forget which one they used. Already logged via log.warn.
+//   - payments backfill fail: non-fatal by design (quote_requests is the
+//     source of truth; payments.claimed_at is a nice-to-have). A
+//     concurrent magic-link reclick can race here; capturing would flood.
+//   - idempotent re-click (user_id===auth.uid()): happy path, no capture.
+//
+// PII contract: `requestId` is a UUID exposed in the URL — safe to tag.
+// `userId` is NOT tagged (user-level correlation belongs on Sentry's
+// user scope). Never tag email, phone, or intake payload.
+export type ClaimReason = 'requestLoadFailed' | 'quoteBackfillFailed';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,6 +97,23 @@ export async function GET(request: NextRequest) {
     .maybeSingle();
 
   if (loadErr || !req) {
+    // Capture only when the DB returned a real error. A missing row with
+    // error===null is user-facing (wrong/expired request id) and capturing
+    // would flood on share-link misuse. A real DB error (permission denied,
+    // connection, RLS policy regression) is worth paging on.
+    if (loadErr) {
+      const msg =
+        loadErr && typeof loadErr === 'object' && 'message' in loadErr
+          ? String((loadErr as { message: unknown }).message)
+          : String(loadErr);
+      captureException(new Error(`claim requestLoadFailed: ${msg}`), {
+        tags: {
+          route: 'get-quotes/claim',
+          reason: 'requestLoadFailed',
+          requestId,
+        },
+      });
+    }
     return errorRedirect(origin, 'Quote request not found', requestId);
   }
 
@@ -102,6 +143,11 @@ export async function GET(request: NextRequest) {
     // Signed-in user != the email used at intake. Refuse.
     // Logger redacts emails — we want just enough signal (user id, request
     // id) to investigate without writing full addresses to log storage.
+    //
+    // DO NOT interpolate intakeEmail into the user-visible message. A
+    // forwarded/leaked claim URL would otherwise disclose who paid for
+    // the request to anyone who clicks it. Generic hint is enough —
+    // the real owner knows which email they used.
     log.warn('email mismatch — claim refused', {
       requestId,
       userId: user.id,
@@ -110,7 +156,7 @@ export async function GET(request: NextRequest) {
     });
     return errorRedirect(
       origin,
-      `This request was placed with a different email. Sign in as ${intakeEmail} to claim it.`,
+      'This request was placed with a different email. Sign in with the email used at checkout to claim it.',
       requestId
     );
   }
@@ -130,7 +176,22 @@ export async function GET(request: NextRequest) {
     if (reqUpdErr) {
       log.error('quote_requests backfill failed', {
         requestId,
-        err: reqUpdErr.message,
+        err: reqUpdErr,
+      });
+      // This is the trust-destroying path — customer paid, auth matched,
+      // and we still couldn't link. They land on an error page. Capture
+      // with stable fingerprint so Sentry dedupes the underlying incident
+      // across many concurrent stranded customers.
+      const msg =
+        reqUpdErr && typeof reqUpdErr === 'object' && 'message' in reqUpdErr
+          ? String((reqUpdErr as { message: unknown }).message)
+          : String(reqUpdErr);
+      captureException(new Error(`claim quoteBackfillFailed: ${msg}`), {
+        tags: {
+          route: 'get-quotes/claim',
+          reason: 'quoteBackfillFailed',
+          requestId,
+        },
       });
       return errorRedirect(origin, 'Could not link your account — please contact support', requestId);
     }
@@ -150,7 +211,7 @@ export async function GET(request: NextRequest) {
     // row is still valid. Log and continue.
     log.error('payments backfill failed', {
       requestId,
-      err: payUpdErr.message,
+      err: payUpdErr,
     });
   }
 

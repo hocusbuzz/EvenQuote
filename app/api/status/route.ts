@@ -29,6 +29,7 @@
 
 import { NextResponse } from 'next/server';
 import { createLogger } from '@/lib/logger';
+import { assertCronAuth } from '@/lib/security/cron-auth';
 
 const log = createLogger('status');
 
@@ -48,21 +49,6 @@ export type StatusResponse = {
   };
   errors?: Record<string, string>;
 };
-
-function unauthorized() {
-  return NextResponse.json(
-    { ok: false, error: 'unauthorized' },
-    { status: 401 }
-  );
-}
-
-function extractSecret(req: Request): string {
-  return (
-    req.headers.get('x-cron-secret') ??
-    req.headers.get('X-Cron-Secret') ??
-    (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '')
-  );
-}
 
 /**
  * Exercise Stripe with a cheap customers.list({limit:1}) call.
@@ -128,14 +114,8 @@ export async function checkVapi(): Promise<{ outcome: CheckOutcome; message?: st
 }
 
 async function handle(req: Request) {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, error: 'CRON_SECRET not configured' },
-      { status: 500 }
-    );
-  }
-  if (extractSecret(req) !== expected) return unauthorized();
+  const deny = assertCronAuth(req);
+  if (deny) return deny;
 
   // Run both probes in parallel — they're independent, and /status
   // should not take longer than the slower of the two.

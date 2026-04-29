@@ -1,11 +1,19 @@
 # Content Security Policy — Implementation Plan
 
-**Status:** Round 9 (2026-04-22) landed nonce-based CSP infrastructure
-behind the `CSP_NONCE_ENABLED` env flag. **It is currently OFF in
-production.** The minimal static CSP (frame-ancestors, form-action,
-base-uri, object-src) remains live via `next.config.mjs`. The next
-operator action is to flip `CSP_NONCE_ENABLED=true` in Vercel and watch
-`/api/csp-report` logs for 7 days before flipping `CSP_ENFORCE=true`.
+**Status:** Round 21 (2026-04-23) landed the end-to-end analyze workflow
+for the Report-Only window (persistence gate + aggregator script +
+migration). The nonce-based CSP infrastructure from Round 9 is still
+behind `CSP_NONCE_ENABLED` (default OFF in production) and the minimal
+static CSP remains live via `next.config.mjs`. The next operator action
+is the two-step rollout documented below:
+
+1.  **Open the collection window:** apply migration
+    `0009_csp_violations.sql`, then flip `CSP_VIOLATIONS_PERSIST=true`
+    in Vercel production for ~2 weeks.
+2.  **Run the aggregator + populate allow-lists:** `npx tsx
+    scripts/analyze-csp-reports.ts --days=14`, translate its output
+    into `script-src` / `style-src` / `img-src` allow-list entries
+    inside `next.config.mjs` `minimalCsp`, then flip `CSP_ENFORCE=true`.
 
 What landed in Round 9:
 - `lib/security/csp.ts` — pure helpers `buildCsp`, `generateNonce`,
@@ -18,7 +26,23 @@ What landed in Round 9:
 - `app/api/csp-report/route.ts` — receives browser violation reports,
   logs structured summary lines, returns 204 (7 tests).
 
-What is NOT yet done (deferred until after the report-only window):
+What landed in Round 21:
+- `supabase/migrations/0009_csp_violations.sql` — narrow schema:
+  `effective_directive`, `violated_directive`,
+  stripped-host `document_uri` / `blocked_uri` / `source_file`
+  columns. **No `raw` jsonb blob** — the browser-reported payload
+  often contains user-identifying referrers, so we persist ONLY the
+  fields we actually need and strip query strings at the route.
+- `CSP_VIOLATIONS_PERSIST=true` gate on the POST route so the DB
+  write is opt-in. Default OFF keeps pre-launch signal quiet.
+- `scripts/analyze-csp-reports.ts` — read-only aggregator that groups
+  rows by `(effective_directive, blocked_uri_host)`, surfaces the top
+  N groups with their distinct document hosts, then a directive
+  rollup, then a "flip readiness" heuristic. No mutation; the policy
+  change still lands in `next.config.mjs` via human code review.
+- Route test coverage: 26/26 in `app/api/csp-report/route.test.ts`.
+
+What is NOT yet done (deferred until after the collection window):
 - Threading the nonce through `<Script>` tags in `app/layout.tsx`.
   The inline JSON-LD scripts will violate under report-only and show
   up in `/api/csp-report` logs — that is the expected signal. Before
@@ -28,7 +52,7 @@ What is NOT yet done (deferred until after the report-only window):
   coexist while we are in report-only mode (different header names);
   the static one stays as a safety net for now.
 
-**Last updated:** 2026-04-22 (Round 9)
+**Last updated:** 2026-04-23 (Round 22 — analyze-script workflow)
 
 ---
 
@@ -162,3 +186,134 @@ XSS — that's what nonces are for, and is Step 1 above.
 - [Next.js CSP docs](https://nextjs.org/docs/app/building-your-application/configuring/content-security-policy)
 - [MDN CSP reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP)
 - [CSP Evaluator](https://csp-evaluator.withgoogle.com/) — paste the proposed policy to sanity-check
+
+---
+
+## Round 22 — collection window + analyze workflow (runbook)
+
+This is the exact sequence to go from "Report-Only is live" to
+"Enforce is live" safely. Each step is forward-safe and reversible.
+
+### Step A — apply the CSP violations migration
+
+```bash
+# From project root, with your prod DB target selected:
+npx supabase db push
+# Or: paste supabase/migrations/0009_csp_violations.sql into the
+# Supabase SQL editor for the production project.
+```
+
+Migration creates `csp_violations` with a narrow column set. No
+breaking changes to existing tables. Safe to apply even while
+`CSP_VIOLATIONS_PERSIST` is still OFF — the table just sits empty.
+
+### Step B — open the collection window
+
+In Vercel production env vars:
+
+```
+CSP_VIOLATIONS_PERSIST=true
+```
+
+Leave this on for **~2 weeks**. The POST handler at
+`/api/csp-report` inserts one row per browser-reported violation and
+always returns 204. Insert failures are swallowed so a schema drift
+can never 5xx the route or destabilize page loads. Leave
+`CSP_NONCE_ENABLED=true` as-is (Report-Only) — the minimal static CSP
+in `next.config.mjs` continues to protect against clickjacking / base-uri
+abuse throughout.
+
+### Step C — run the aggregator
+
+```bash
+npx tsx scripts/analyze-csp-reports.ts --days=14
+```
+
+Sample output (truncated):
+
+```
+=== CSP VIOLATION SUMMARY — last 14d ===
+3421 total rows, 12 distinct (directive × host) groups
+
+TOP OFFENDERS
+  script-src  js.stripe.com              1847 hits  across 3 docs
+  style-src   fonts.googleapis.com        612 hits  across 2 docs
+  img-src     i.vimeocdn.com              188 hits  across 1 doc
+  script-src  chrome-extension            134 hits  ← BROWSER NOISE, ignore
+
+DIRECTIVE ROLLUP
+  script-src  2129 hits
+  style-src    672 hits
+  img-src      188 hits
+
+FLIP READINESS
+  script-src  KNOWN  (all hosts in allow-list candidates)
+  style-src   KNOWN  (all hosts in allow-list candidates)
+  img-src     KNOWN  (all hosts in allow-list candidates)
+  → ready to flip CSP_ENFORCE=true
+```
+
+Chrome extensions and other browser-injected scripts will show up
+(the `chrome-extension` scheme is a common one). Ignore anything you
+can confirm is NOT a real site dependency. Everything else gets
+translated into an allow-list entry in the next step.
+
+### Step D — populate the allow-lists
+
+Edit `next.config.mjs` → `minimalCsp` → the matching directive. Keep
+the additions minimal; broaden scope only when the aggregator shows
+multiple paths under the same host.
+
+```js
+// next.config.mjs (sketch)
+`script-src 'self' 'unsafe-inline' https://js.stripe.com`,
+`style-src  'self' 'unsafe-inline' https://fonts.googleapis.com`,
+`img-src    'self' data: https://i.vimeocdn.com`,
+```
+
+Reasoning trail: every host in the policy should trace back to a row
+in the aggregator output. If a host is there without a matching
+violation record, it is speculative — drop it.
+
+### Step E — flip Enforce
+
+In Vercel production env vars:
+
+```
+CSP_ENFORCE=true
+```
+
+Middleware switches the header name from
+`Content-Security-Policy-Report-Only` to `Content-Security-Policy`.
+Watch `/api/csp-report` for the next 24h — ideally the row-rate
+drops to near-zero. If it doesn't, a host in the aggregator was
+missed; revert `CSP_ENFORCE=false` (the Report-Only fallback stays
+live), add the host, repeat.
+
+### Step F — close the collection window
+
+Once Enforce has been stable for a week:
+
+```
+CSP_VIOLATIONS_PERSIST=false
+```
+
+The route still 204s on every POST, but the DB write shuts off. The
+`csp_violations` table stays populated for historical spelunking; a
+future incident can repeat the loop by flipping `PERSIST` back on.
+
+### Local dry-run (optional)
+
+Before the prod collection window, you can exercise the analyze
+script locally. `scripts/seed-csp-sample.ts` inserts a handful of
+realistic mocked violations into a local Supabase DB so you can see
+the aggregator output format end-to-end:
+
+```bash
+npx tsx scripts/seed-csp-sample.ts
+npx tsx scripts/analyze-csp-reports.ts --days=30
+```
+
+Delete the seeded rows afterward (the script prints the IDs it
+inserted) or point the seed script at a throwaway test DB. Never run
+the seed against production.

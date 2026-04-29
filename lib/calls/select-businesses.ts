@@ -36,6 +36,15 @@ export type SelectInput = {
   limit: number;
   /** Default 25 miles; override for dense metros or rural fallbacks. */
   radiusMiles?: number;
+  /**
+   * Optional request origin coordinates. When present, the radius tier
+   * anchors on these instead of the "pick any business in the same zip"
+   * centroid trick — more accurate, and works for cold-start zips where
+   * no businesses have been seeded yet. NULL on legacy / manual-entry
+   * rows; selector falls back to the in-zip anchor in that case.
+   */
+  originLat?: number | null;
+  originLng?: number | null;
 };
 
 const DEFAULT_RADIUS_MILES = 25;
@@ -64,24 +73,52 @@ export async function selectBusinessesForRequest(
   if (zipErr) throw new Error(`selectBusinesses zip: ${zipErr.message}`);
   const inZip = (zipData ?? []) as SelectedBusiness[];
 
-  if (inZip.length >= limit) return inZip;
+  if (inZip.length >= limit) return dedupeByPhone(inZip);
 
+  // Tracks IDs AND normalized phone numbers we've already committed to
+  // dialing in this batch. Without the phone dedup, two seeded rows for
+  // the same chain (different franchises, multiple listings of the same
+  // pro, re-ingested duplicates) could both be dialed — burning a
+  // second call for zero new information. Phone dedup is our safety
+  // net on top of the DB-level ID dedup.
   const seen = new Set(inZip.map((b) => b.id));
+  const seenPhones = new Set(inZip.map((b) => normalizePhone(b.phone)));
   const need = limit - inZip.length;
 
-  // Tier 2: radius search around the zip's centroid. Derive the centroid
-  // from the lat/lng of a business we already know is in that zip — any
-  // business is fine because zip codes are small enough that the bias
-  // from picking one point is well within the 25-mile default.
+  // Tier 2: radius search.
+  //
+  // Anchor preference:
+  //   1. The request's origin coords (captured from the Place Details
+  //      pick when the form was submitted). Most accurate, and works
+  //      for brand-new zips that have zero businesses yet — which is
+  //      the common case post-R47 when on-demand seeding is the
+  //      primary intake path.
+  //   2. Fallback: the lat/lng of any business already in that zip.
+  //      Zip codes are small enough that picking one is well within
+  //      the 25-mile default's noise floor.
+  //   3. Final fallback (no origin coords AND no in-zip business):
+  //      tier 2 returns empty and the cascade drops to state backfill.
   const radius = await fetchRadius(admin, {
     categoryId,
     zipCode,
     radiusMiles,
+    originLat: input.originLat ?? null,
+    originLng: input.originLng ?? null,
     // Overfetch so dedupe against tier 1 still leaves us with enough.
     limit: (need + seen.size) * 2,
   });
-  const radiusPicks = radius.filter((b) => !seen.has(b.id)).slice(0, need);
-  radiusPicks.forEach((b) => seen.add(b.id));
+  const radiusPicks = radius
+    .filter((b) => {
+      if (seen.has(b.id)) return false;
+      const np = normalizePhone(b.phone);
+      if (seenPhones.has(np)) return false;
+      return true;
+    })
+    .slice(0, need);
+  radiusPicks.forEach((b) => {
+    seen.add(b.id);
+    seenPhones.add(normalizePhone(b.phone));
+  });
 
   if (inZip.length + radiusPicks.length >= limit) {
     return [...inZip, ...radiusPicks];
@@ -101,9 +138,49 @@ export async function selectBusinessesForRequest(
     .limit((need2 + seen.size) * 2);
   if (stateErr) throw new Error(`selectBusinesses state: ${stateErr.message}`);
   const inState = (stateData ?? []) as SelectedBusiness[];
-  const statePicks = inState.filter((b) => !seen.has(b.id)).slice(0, need2);
+  const statePicks = inState
+    .filter((b) => {
+      if (seen.has(b.id)) return false;
+      const np = normalizePhone(b.phone);
+      if (seenPhones.has(np)) return false;
+      return true;
+    })
+    .slice(0, need2);
 
   return [...inZip, ...radiusPicks, ...statePicks];
+}
+
+/**
+ * Normalize a phone number for duplicate detection. Strips every
+ * non-digit character and drops a leading US country code, so
+ * "+1 (760) 555-0123", "1-760-555-0123" and "7605550123" all collapse
+ * to the same key. Returns an empty string for missing input — which
+ * is treated as its own bucket so empty-phone rows (shouldn't happen
+ * post-ingest validation, but defensive) aren't deduped against each
+ * other in a lossy way.
+ */
+function normalizePhone(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits;
+}
+
+/**
+ * Dedup an already-selected list by phone. Used for the tier-1-only
+ * early-return path, where tier 1 can itself contain dupes if the
+ * upstream businesses table has them for the same zip.
+ */
+function dedupeByPhone(rows: SelectedBusiness[]): SelectedBusiness[] {
+  const seen = new Set<string>();
+  const out: SelectedBusiness[] = [];
+  for (const b of rows) {
+    const np = normalizePhone(b.phone);
+    if (np && seen.has(np)) continue;
+    if (np) seen.add(np);
+    out.push(b);
+  }
+  return out;
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
@@ -115,40 +192,54 @@ async function fetchRadius(
     zipCode: string;
     radiusMiles: number;
     limit: number;
+    originLat: number | null;
+    originLng: number | null;
   }
 ): Promise<SelectedBusiness[]> {
-  // Pick any one business in the target zip and use its coords as the
-  // search center. If the zip has no seeded businesses at all we can't
-  // compute a centroid, so radius-tier just returns empty and we fall
-  // through to state backfill.
-  const { data: anchor, error: anchorErr } = await admin
-    .from('businesses')
-    .select('latitude, longitude')
-    .eq('category_id', opts.categoryId)
-    .eq('zip_code', opts.zipCode)
-    .not('latitude', 'is', null)
-    .not('longitude', 'is', null)
-    .limit(1)
-    .maybeSingle();
+  // Resolve the radius anchor.
+  //   1. Prefer the request's origin coords — captured from Google
+  //      Place Details when the user picked a prediction. Works even
+  //      when the zip has zero seeded businesses (cold-start case).
+  //   2. Fall back to "pick any business in this zip and use its
+  //      coords" — covers legacy/manual address entries with no coords
+  //      AND zips that already have at least one business.
+  //   3. If neither anchor is available, give up on the radius tier;
+  //      the cascade drops to state backfill.
+  let anchorLat: number | null = opts.originLat;
+  let anchorLng: number | null = opts.originLng;
 
-  if (anchorErr) {
-    // Soft-fail the radius tier — don't take down the whole selector
-    // over a radius lookup issue.
-    log.warn('radius anchor lookup failed', { err: anchorErr.message });
-    return [];
+  if (anchorLat == null || anchorLng == null) {
+    const { data: anchor, error: anchorErr } = await admin
+      .from('businesses')
+      .select('latitude, longitude')
+      .eq('category_id', opts.categoryId)
+      .eq('zip_code', opts.zipCode)
+      .not('latitude', 'is', null)
+      .not('longitude', 'is', null)
+      .limit(1)
+      .maybeSingle();
+
+    if (anchorErr) {
+      // Soft-fail the radius tier — don't take down the whole selector
+      // over a radius lookup issue.
+      log.warn('radius anchor lookup failed', { err: anchorErr });
+      return [];
+    }
+    if (!anchor) return [];
+    anchorLat = anchor.latitude;
+    anchorLng = anchor.longitude;
   }
-  if (!anchor) return [];
 
   const { data, error } = await admin.rpc('businesses_within_radius', {
     p_category_id: opts.categoryId,
-    p_lat: anchor.latitude,
-    p_lng: anchor.longitude,
+    p_lat: anchorLat,
+    p_lng: anchorLng,
     p_radius_miles: opts.radiusMiles,
     p_limit: opts.limit,
   });
 
   if (error) {
-    log.warn('radius rpc failed', { err: error.message });
+    log.warn('radius rpc failed', { err: error });
     return [];
   }
 

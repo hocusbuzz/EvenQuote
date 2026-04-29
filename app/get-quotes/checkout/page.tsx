@@ -39,6 +39,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
 import { PayButton } from '@/components/checkout/pay-button';
+import { SkipPaymentButton } from '@/components/checkout/skip-payment-button';
 import { QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
 import { maskEmail } from '@/lib/text/pii';
 
@@ -143,7 +144,7 @@ export default async function CheckoutPage({ searchParams }: Props) {
             Ready to make the calls.
           </h1>
           <p className="mt-3 text-muted-foreground relative z-10">
-            We&rsquo;ll ring up to <span className="font-semibold text-foreground">20 {noun}</span>{' '}
+            We&rsquo;ll ring up to <span className="font-semibold text-foreground">10 {noun}</span>{' '}
             in <span className="font-semibold text-foreground">{request.city}, {request.state}</span>{' '}
             and deliver a side-by-side quote report to{' '}
             <span className="font-semibold text-foreground">
@@ -198,6 +199,35 @@ export default async function CheckoutPage({ searchParams }: Props) {
             <p className="mt-3 text-xs text-muted-foreground">
               You&rsquo;ll be redirected to Stripe for secure payment. We never see your card.
             </p>
+            {/* R47.5: explicit consent line — clicking Pay constitutes
+                acceptance per the Terms section 1. Footer also links
+                both pages, but the placement here is the legally-
+                meaningful one (presented at the moment of purchase). */}
+            <p className="mt-2 text-xs text-muted-foreground">
+              By paying, you agree to our{' '}
+              <Link
+                href="/legal/terms"
+                className="underline-offset-2 hover:underline"
+              >
+                Terms
+              </Link>{' '}
+              and{' '}
+              <Link
+                href="/legal/privacy"
+                className="underline-offset-2 hover:underline"
+              >
+                Privacy Policy
+              </Link>
+              .
+            </p>
+
+            {/* Dev-only payment bypass. Only rendered off-production.
+                In prod this entire block is tree-shaken away because
+                the check is a compile-time constant from process.env
+                inlined at build. */}
+            {process.env.NODE_ENV !== 'production' ? (
+              <SkipPaymentButton requestId={request.id} />
+            ) : null}
           </div>
 
           <div className="mt-6 text-sm relative z-10">

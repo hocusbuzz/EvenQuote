@@ -12,11 +12,17 @@
 //   - same apply_call_end RPC (counters + status advance)
 //   - same recompute_business_success_rate refresh
 //
-// Idempotency: short-circuits on any TERMINAL_STATUS so replay is safe.
+// Idempotency: short-circuits on calls.counters_applied_at being stamped.
+// (Was previously a status-terminal check, which silently dropped counter
+// bumps if the RPC failed after the status UPDATE had already succeeded —
+// fixed in migration 0008. The status UPDATE, quote insert, and RPC are
+// individually idempotent, so on a retry-repair we re-run the lot; the
+// RPC's internal claim UPDATE guarantees counters bump at most once.)
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { extractQuoteFromCall } from '@/lib/calls/extract-quote';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('apply-end-of-call');
 
@@ -54,16 +60,12 @@ export type ApplyResult = {
   note?: string;
 };
 
-const TERMINAL_STATUSES = new Set<string>([
-  'completed',
-  'failed',
-  'no_answer',
-  'refused',
-]);
-
 /**
  * Apply an end-of-call report to our DB. Safe to call multiple times
- * for the same vapi_call_id — subsequent calls short-circuit.
+ * for the same vapi_call_id — subsequent calls short-circuit only once
+ * counters_applied_at has been stamped. A call that wrote a terminal
+ * status but whose RPC failed before stamping the sentinel will
+ * correctly re-run on the next webhook retry.
  */
 export async function applyEndOfCall(
   admin: SupabaseClient,
@@ -79,6 +81,7 @@ export async function applyEndOfCall(
       quote_request_id,
       business_id,
       status,
+      counters_applied_at,
       quote_requests (
         category_id,
         service_categories (
@@ -101,13 +104,17 @@ export async function applyEndOfCall(
     };
   }
 
-  // Short-circuit on ANY terminal status. Replay-safe.
-  if (TERMINAL_STATUSES.has(call.status)) {
+  // Short-circuit ONLY when counters were already applied. Terminal
+  // status alone is not sufficient — an earlier run may have written
+  // the status and then crashed before the RPC bumped counters. The
+  // sentinel is stamped atomically inside apply_call_end so retries can
+  // correctly repair a partial apply.
+  if (call.counters_applied_at) {
     return {
       applied: false,
       status: call.status,
       quoteInserted: false,
-      note: `call ${call.id} already in terminal status=${call.status}`,
+      note: `call ${call.id} counters already applied at ${call.counters_applied_at}`,
     };
   }
 
@@ -171,19 +178,59 @@ export async function applyEndOfCall(
         // quotes.call_id is UNIQUE — duplicate insert from a retry is
         // the expected failure here; swallow it.
         if ((quoteErr as { code?: string }).code !== '23505') {
-          log.error('quotes insert failed', { err: quoteErr.message });
+          log.error('quotes insert failed', { err: quoteErr });
+          // Lib-boundary capture for non-23505 quote-insert failures.
+          // 23505 (unique_violation) is the expected retry path and is
+          // intentionally NOT captured — capturing it would flood Sentry
+          // on every Vapi redelivery. Everything else (permission denied,
+          // schema drift, FK violations) is a real ops signal.
+          //
+          // Tag shape mirrors `lib/calls/engine.ts`: `lib` names the
+          // caller-visible operation, `reason` disambiguates the failure
+          // mode within that lib, and we carry both the internal call id
+          // and quote_request_id as opaque UUIDs. No PII: contactName,
+          // contactPhone, contactEmail are deliberately NOT in tags.
+          const wrapped = new Error(
+            `apply-end-of-call quotes insert: ${(quoteErr as { message?: string }).message ?? 'unknown'}`
+          );
+          captureException(wrapped, {
+            tags: {
+              lib: 'apply-end-of-call',
+              reason: 'quotesInsertFailed',
+              callId: call.id,
+              quoteRequestId: call.quote_request_id,
+            },
+          });
         }
       } else {
         quoteInserted = true;
       }
     } else {
-      log.info('no quote extracted', { reason: extraction.reason });
+      // The reason is intentionally NOT captured to Sentry (would flood
+      // on benign cases like empty transcripts), but we need ops
+      // visibility to tune the extractor prompt. Bumping from .info to
+      // .warn so it stands out in dev-server output, and enriching with
+      // enough context (callId, transcript length, summary preview) to
+      // diagnose without going back to Supabase. R47.1.
+      log.warn('no quote extracted from call', {
+        reason: extraction.reason,
+        callId: call.id,
+        businessId: call.business_id,
+        quoteRequestId: call.quote_request_id,
+        transcriptLen: (report.transcript ?? '').length,
+        summaryPreview: (report.summary ?? '').slice(0, 200),
+      });
     }
   }
 
-  // 5. Bump counters on the quote_request atomically.
+  // 5. Bump counters on the quote_request atomically. The RPC also
+  //    atomically stamps calls.counters_applied_at so a retry of this
+  //    function after a post-status-UPDATE crash will re-execute here
+  //    (good — we need it to run) but the RPC itself will no-op the
+  //    counter bump if it already ran (good — no double-count).
   const { error: rpcErr } = await admin.rpc('apply_call_end', {
     p_request_id: call.quote_request_id,
+    p_call_id: call.id,
     p_quote_inserted: quoteInserted,
   });
 
@@ -197,7 +244,25 @@ export async function applyEndOfCall(
     p_window: 20,
   });
   if (scoreErr) {
-    log.warn('recompute_business_success_rate failed', { err: scoreErr.message });
+    log.warn('recompute_business_success_rate failed', { err: scoreErr });
+    // Best-effort, so we don't throw — but we DO capture. A persistent
+    // failure here means business.success_rate goes stale, which feeds
+    // directly into the business selector's ranking. Without Sentry we'd
+    // silently degrade quote quality.
+    //
+    // businessId is carried as an opaque UUID (not a business name) to
+    // keep tags PII-free.
+    const wrapped = new Error(
+      `apply-end-of-call recompute_business_success_rate: ${scoreErr.message}`
+    );
+    captureException(wrapped, {
+      tags: {
+        lib: 'apply-end-of-call',
+        reason: 'recomputeFailed',
+        callId: call.id,
+        businessId: call.business_id,
+      },
+    });
   }
 
   return {

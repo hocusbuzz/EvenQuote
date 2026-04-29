@@ -13,6 +13,30 @@
 // Global fetch is mocked via vi.stubGlobal for the live-call cases.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// Mock the admin client so vapi.ts's selector path never tries to open
+// a real Supabase connection during these tests. The default rpc mock
+// returns an empty pool, so the selector falls back to the env var —
+// which is what the existing tests already assume.
+const rpcMock = vi.fn().mockResolvedValue({ data: [], error: null });
+vi.mock('@/lib/supabase/admin', () => ({
+  createAdminClient: vi.fn(() => ({ rpc: rpcMock })),
+}));
+
+// Round 20: lib-boundary observability. Mock the sentry boundary so we
+// can assert captureException was called with the canonical tag shape
+// on each failure mode without the stub's log.error firing.
+const captureExceptionMock = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (err: unknown, ctx?: unknown) =>
+    captureExceptionMock(err, ctx),
+  captureMessage: vi.fn(),
+  init: vi.fn(),
+  isEnabled: () => false,
+  setUser: vi.fn(),
+  __resetForTests: vi.fn(),
+}));
+
 import { startOutboundCall, verifyVapiWebhook } from './vapi';
 
 // TS 5 + @types/node 20+ type NODE_ENV as a readonly literal union, so
@@ -24,12 +48,16 @@ const env = process.env as Record<string, string | undefined>;
 // Utility — we flip env vars a lot. Keep a clean slate between tests.
 // Plain string[] (not `as const`) so indexing process.env with these keys
 // doesn't narrow to NODE_ENV's readonly literal type under strict TS 5.
+// Supabase env keys are included so the selector doesn't reach the
+// mocked RPC unless a test explicitly opts in by setting them.
 const ENV_KEYS: string[] = [
   'VAPI_API_KEY',
   'VAPI_PHONE_NUMBER_ID',
   'VAPI_ASSISTANT_ID',
   'VAPI_WEBHOOK_SECRET',
   'TEST_OVERRIDE_PHONE',
+  'NEXT_PUBLIC_SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
   'NODE_ENV',
 ];
 
@@ -37,6 +65,9 @@ describe('startOutboundCall', () => {
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(() => {
+    rpcMock.mockClear();
+    rpcMock.mockResolvedValue({ data: [], error: null });
+    captureExceptionMock.mockReset();
     for (const k of ENV_KEYS) saved[k] = process.env[k];
     // Scrub by default.
     for (const k of ENV_KEYS) delete process.env[k];
@@ -137,6 +168,42 @@ describe('startOutboundCall', () => {
     expect(body.assistantOverrides.variableValues.business_name).toBe(longName);
   });
 
+  it('uses the pool-selected phoneNumberId when the RPC returns a row', async () => {
+    // This is the new hot path: Supabase env set, pool has a matching
+    // number for the destination area code. The body should carry the
+    // pool's phoneNumberId, not the env var's.
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_env_fallback'; // should NOT be used
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_role_key';
+
+    rpcMock.mockResolvedValue({
+      data: [
+        {
+          id: 'phone_pool_415',
+          twilio_e164: '+14155550100',
+          area_code: '415',
+          tier: 'area_code',
+        },
+      ],
+      error: null,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: 'vapi_call_abc' }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await startOutboundCall(input);
+    expect(result.ok).toBe(true);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.phoneNumberId).toBe('phone_pool_415');
+    // Env var was present but the pool won; confirms selector precedence.
+    expect(body.phoneNumberId).not.toBe('phone_env_fallback');
+  });
+
   it('TEST_OVERRIDE_PHONE redirects the dial number, keeps metadata', async () => {
     process.env.VAPI_API_KEY = 'vapi_test_key';
     process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
@@ -204,6 +271,204 @@ describe('startOutboundCall', () => {
     const result = await startOutboundCall(input);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/ECONNRESET/);
+  });
+
+  // ── Round 20 observability contract ──
+  //
+  // startOutboundCall silently swallowed failures before this round —
+  // non-2xx, malformed response, and network throws all returned
+  // { ok: false } without reaching the error tracker. The engine
+  // records per-business failure so the batch doesn't abort, but a
+  // failed outbound call is a trust-destroying silent miss. Capturing
+  // at the lib boundary means every caller (engine, cron, future
+  // support retry) inherits first-class alerting.
+
+  it('captures Vapi non-2xx with reason=startCallHttpFailed + httpStatus', async () => {
+    // Round 24: `reason` is now per-failure-mode so Sentry alerts can
+    // fire per-mode without parsing error messages. httpStatus lets the
+    // dashboard split 4xx (our config/auth) from 5xx (Vapi outage).
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
+      )
+    );
+
+    await startOutboundCall(input);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/403/);
+    expect(ctx).toMatchObject({
+      tags: {
+        lib: 'vapi',
+        reason: 'startCallHttpFailed',
+        businessId: 'biz_1',
+        httpStatus: '403',
+      },
+    });
+  });
+
+  it('captures missing-id response with reason=startCallMissingId', async () => {
+    // Contract violation — Vapi returned 2xx with no call id. Page on
+    // first occurrence (distinct from HttpFailed).
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ not_an_id: true }), { status: 200 })
+      )
+    );
+
+    await startOutboundCall(input);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/missing call id/);
+    expect(ctx).toMatchObject({
+      tags: { lib: 'vapi', reason: 'startCallMissingId', businessId: 'biz_1' },
+    });
+    // No httpStatus on this branch — we got a 2xx so status isn't the signal.
+    const tags = (ctx as { tags: Record<string, string> }).tags;
+    expect(tags.httpStatus).toBeUndefined();
+  });
+
+  it('captures transport-level throws with reason=startCallTransportFailed', async () => {
+    // DNS / TLS / socket / timeout before Vapi responded. Distinct from
+    // HttpFailed (which requires a response) and MissingId (2xx + bad body).
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNRESET')));
+
+    await startOutboundCall(input);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureExceptionMock.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('ECONNRESET');
+    expect(ctx).toMatchObject({
+      tags: {
+        lib: 'vapi',
+        reason: 'startCallTransportFailed',
+        businessId: 'biz_1',
+      },
+    });
+    const tags = (ctx as { tags: Record<string, string> }).tags;
+    expect(tags.httpStatus).toBeUndefined();
+  });
+
+  it('reason values are the three discrete modes — never the Round-20 "startCall" catch-all', async () => {
+    // Regression guard: if a future refactor reintroduces a single
+    // `reason: 'startCall'` for all three modes, ops loses per-mode
+    // alerting. This test asserts none of the three failure modes
+    // emits the old catch-all reason.
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    // Mode 1: non-2xx
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('x', { status: 500 }))
+    );
+    await startOutboundCall(input);
+    // Mode 2: 2xx missing id
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({}), { status: 200 })
+      )
+    );
+    await startOutboundCall(input);
+    // Mode 3: transport throw
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('x')));
+    await startOutboundCall(input);
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(3);
+    const reasons = captureExceptionMock.mock.calls.map(
+      (c) => (c[1] as { tags: Record<string, string> }).tags.reason
+    );
+    expect(reasons).toEqual([
+      'startCallHttpFailed',
+      'startCallMissingId',
+      'startCallTransportFailed',
+    ]);
+    expect(reasons).not.toContain('startCall');
+  });
+
+  it('does NOT include the destination phone as a tag value (privacy)', async () => {
+    // The toPhone is PII when paired with name/location. Logger
+    // redaction does not reach Sentry tags — if someone adds
+    // `{ toPhone: input.toPhone }` to captureTags, this test catches
+    // it before the tracker indexes a real phone number.
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('boom')));
+
+    await startOutboundCall({ ...input, toPhone: '+14155559999' });
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    const serialized = JSON.stringify(ctx);
+    expect(serialized).not.toContain('+14155559999');
+    expect(serialized).not.toContain('4155559999');
+  });
+
+  it('omits businessId from tags when metadata does not carry one', async () => {
+    // Some call paths (future reconciliation retry, manual dispatch)
+    // may not have metadata.business_id wired yet. Tag set must still
+    // be well-formed — never an empty or "undefined" literal.
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('boom')));
+
+    await startOutboundCall({ ...input, metadata: {} });
+
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    expect((ctx as { tags: Record<string, string> }).tags).toEqual({
+      lib: 'vapi',
+      reason: 'startCallTransportFailed',
+    });
+  });
+
+  it('happy path does not capture anything', async () => {
+    process.env.VAPI_API_KEY = 'vapi_test_key';
+    process.env.VAPI_PHONE_NUMBER_ID = 'phone_1';
+    process.env.VAPI_ASSISTANT_ID = 'assistant_1';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ id: 'vapi_ok' }), { status: 200 })
+      )
+    );
+
+    const result = await startOutboundCall(input);
+    expect(result.ok).toBe(true);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it('simulation mode does not capture (no real dispatch, no failure)', async () => {
+    // VAPI_API_KEY unset → simulation. Must not fire a false-positive
+    // sendFailed/startCall event to the tracker.
+    await startOutboundCall(input);
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 });
 

@@ -62,7 +62,7 @@ export default async function DashboardPage() {
     .limit(50);
 
   if (error) {
-    log.error('list failed', { err: error.message });
+    log.error('list failed', { err: error });
   }
 
   const requests = (rows ?? []).map((r) => {
@@ -86,11 +86,31 @@ export default async function DashboardPage() {
             </p>
           </div>
 
-          <form action="/auth/signout" method="POST">
-            <Button type="submit" variant="outline" size="sm">
-              Sign out
-            </Button>
-          </form>
+          <div className="flex items-center gap-2">
+            {/* Admin shortcut, only visible to profiles.role='admin'.
+                The navbar also surfaces this, but a lot of flows land
+                people directly on /dashboard (post-login redirect),
+                so having it here too saves a click. */}
+            {profile?.role === 'admin' ? (
+              <Link
+                href="/admin"
+                className="rounded-md border-2 border-lime px-3 py-1.5 text-sm font-medium hover:bg-lime"
+              >
+                Admin
+              </Link>
+            ) : null}
+            <Link
+              href="/dashboard/billing"
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-lime"
+            >
+              Billing
+            </Link>
+            <form action="/auth/signout" method="POST">
+              <Button type="submit" variant="outline" size="sm">
+                Sign out
+              </Button>
+            </form>
+          </div>
         </header>
 
         {requests.length === 0 ? (

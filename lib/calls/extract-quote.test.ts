@@ -5,8 +5,22 @@
 //     need the network: Vapi structured-data preference, no-api-key fail,
 //     empty-transcript fail, and schema coercion (number/string/array).
 //   • Anthropic fetch is mocked at module boundary via vi.stubGlobal.
+//   • Sentry capture is mocked at module level (same pattern as
+//     engine.test.ts / apply-end-of-call.test.ts) so we can lock the
+//     canonical `{ lib: 'extract-quote', reason }` tag shape at every
+//     non-benign failure site.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const captureExceptionMock = vi.fn();
+vi.mock('@/lib/observability/sentry', () => ({
+  captureException: (...args: unknown[]) => captureExceptionMock(...args),
+  captureMessage: vi.fn(),
+  init: vi.fn(),
+  setUser: vi.fn(),
+  isEnabled: () => false,
+}));
+
 import { extractQuoteFromCall } from './extract-quote';
 
 describe('extractQuoteFromCall', () => {
@@ -14,6 +28,7 @@ describe('extractQuoteFromCall', () => {
 
   beforeEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
+    captureExceptionMock.mockReset();
   });
 
   afterEach(() => {
@@ -108,6 +123,8 @@ describe('extractQuoteFromCall', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/ANTHROPIC_API_KEY/);
+    // Benign config state — MUST NOT capture to tracker.
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 
   it('returns ok:false when transcript is empty and Vapi has no data', async () => {
@@ -118,6 +135,9 @@ describe('extractQuoteFromCall', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/transcript/i);
+    // Empty transcript is expected (voicemail-not-left, carrier hangup) —
+    // MUST NOT capture or Sentry will flood on every such call.
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 
   it('successfully extracts from Claude response with tool_use', async () => {
@@ -160,7 +180,7 @@ describe('extractQuoteFromCall', () => {
     }
   });
 
-  it('reports ok:false when Anthropic returns non-ok HTTP', async () => {
+  it('reports ok:false when Anthropic returns non-ok HTTP (locks extractHttpFailed tag shape)', async () => {
     process.env.ANTHROPIC_API_KEY = 'anth-test';
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -173,9 +193,20 @@ describe('extractQuoteFromCall', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/500/);
+    // Tag shape lock. Dashboards alert per-mode on `reason`; don't let
+    // a future refactor drop `httpStatus` or rename `reason`.
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    expect(ctx).toEqual({
+      tags: {
+        lib: 'extract-quote',
+        reason: 'extractHttpFailed',
+        httpStatus: '500',
+      },
+    });
   });
 
-  it('reports ok:false when Anthropic response has no tool_use', async () => {
+  it('reports ok:false when Anthropic response has no tool_use (locks extractMissingToolUse tag)', async () => {
     process.env.ANTHROPIC_API_KEY = 'anth-test';
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -187,9 +218,42 @@ describe('extractQuoteFromCall', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/tool_use/);
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    expect(ctx).toEqual({
+      tags: { lib: 'extract-quote', reason: 'extractMissingToolUse' },
+    });
   });
 
-  it('handles network error as a soft failure (no throw)', async () => {
+  it('reports ok:false + captures when tool_use input fails schema coercion', async () => {
+    process.env.ANTHROPIC_API_KEY = 'anth-test';
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: [
+          {
+            type: 'tool_use',
+            name: 'record_quote',
+            // non-object input — fails coerceFromClaude's first guard.
+            input: 'not-an-object',
+          },
+        ],
+      }),
+    }) as unknown as typeof fetch;
+    const res = await extractQuoteFromCall({
+      transcript: 'a',
+      summary: null,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toMatch(/schema coercion/);
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    expect(ctx).toEqual({
+      tags: { lib: 'extract-quote', reason: 'extractSchemaCoercionFailed' },
+    });
+  });
+
+  it('handles network error as a soft failure (locks extractTransportFailed tag)', async () => {
     process.env.ANTHROPIC_API_KEY = 'anth-test';
     globalThis.fetch = vi
       .fn()
@@ -200,6 +264,89 @@ describe('extractQuoteFromCall', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/ECONNRESET/);
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureExceptionMock.mock.calls[0];
+    expect(ctx).toEqual({
+      tags: { lib: 'extract-quote', reason: 'extractTransportFailed' },
+    });
+  });
+
+  it('PII guard: tags never contain transcript content, phone, or email', async () => {
+    // Run every captured failure mode and assert no tag value looks
+    // like PII. Cheap belt-and-suspenders: if a future refactor ever
+    // plumbs `transcript` / contact fields into tags, this fails.
+    process.env.ANTHROPIC_API_KEY = 'anth-test';
+    const cases: Array<() => Promise<unknown>> = [
+      async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 500,
+          text: async () => 'raw body',
+        }) as unknown as typeof fetch;
+        return extractQuoteFromCall({
+          transcript: 'contact me at lucy@example.com or 555-123-4567',
+          summary: null,
+        });
+      },
+      async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ content: [{ type: 'text', text: 'x' }] }),
+        }) as unknown as typeof fetch;
+        return extractQuoteFromCall({
+          transcript: 'transcript with phone 555-987-6543',
+          summary: null,
+        });
+      },
+      async () => {
+        globalThis.fetch = vi
+          .fn()
+          .mockRejectedValue(new Error('boom phone 555-000-1111 email a@b.co'));
+        return extractQuoteFromCall({
+          transcript: 'nope@nope.com 555-555-5555',
+          summary: null,
+        });
+      },
+    ];
+    for (const run of cases) {
+      captureExceptionMock.mockReset();
+      await run();
+      for (const call of captureExceptionMock.mock.calls) {
+        const tags = (call[1] as { tags?: Record<string, string> })?.tags ?? {};
+        for (const v of Object.values(tags)) {
+          expect(v).not.toMatch(/@/);
+          // 10+ digit sequences are how phone numbers slip in.
+          expect(v).not.toMatch(/\d{10,}/);
+          // Raw transcript content should never reach tags either.
+          expect(v).not.toMatch(/transcript|contact|nope/i);
+        }
+      }
+    }
+  });
+
+  it('regression-guard: never emits a catch-all reason tag', async () => {
+    // If someone adds a new `captureException` site in this file, they
+    // must pick a discrete reason. Reject catch-alls so dashboards
+    // stay parseable.
+    const FORBIDDEN = new Set<string>([
+      'extractFailed',
+      'runExtract',
+      'unknown',
+      'error',
+    ]);
+    process.env.ANTHROPIC_API_KEY = 'anth-test';
+    // HTTP-fail path (guaranteed to capture).
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => 'x',
+    }) as unknown as typeof fetch;
+    await extractQuoteFromCall({ transcript: 'a', summary: null });
+    for (const call of captureExceptionMock.mock.calls) {
+      const reason = (call[1] as { tags?: Record<string, string> })?.tags?.reason;
+      expect(reason).toBeTruthy();
+      expect(FORBIDDEN.has(String(reason))).toBe(false);
+    }
   });
 
   it('coerces string numbers ("500") into numbers', async () => {

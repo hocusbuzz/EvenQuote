@@ -29,6 +29,34 @@ export const PhoneSchema = z
   .max(20, 'Phone number looks too long')
   .regex(/^[+\d][\d\s\-().]*$/, 'Digits, spaces, and ( ) - + only');
 
+// Email — canonical chain order: trim → toLowerCase → email. Putting
+// `.email()` LAST means trim + lowercase happen before the format
+// check, so "  User@Example.COM  " normalizes to "user@example.com"
+// rather than getting rejected for whitespace/case. Exported as a
+// shared primitive so every vertical intake, waitlist signup, and
+// other email-collecting action uses the same chain. The R45(d)
+// audit (`zod-shared-primitive-drift.test.ts`) locks this.
+export const EmailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email('Valid email, please');
+
+// Env-var email — DELIBERATELY loose (no `.trim()`, no `.toLowerCase()`).
+//
+// Why a separate primitive? Operator-set env vars are NOT user input.
+// If an operator sets `EVENQUOTE_SUPPORT_EMAIL=" Foo@Bar.com "` we
+// want validation to FAIL LOUDLY at boot — silently trimming or
+// lowercasing the value would mask a typo and ship to production. So
+// we keep `.email(...)` for format only and skip normalization.
+//
+// Use this in `lib/env.ts` and any other env-var schema that takes an
+// email-shaped operator input. The R45(d) audit (`zod-shared-primitive-
+// drift.test.ts`) was previously allow-listing `lib/env.ts` because it
+// used an inline `.email()` call; R46(b) lifts that exception by
+// pointing `lib/env.ts` at this primitive.
+export const EnvEmailSchema = z.string().email();
+
 // Full list of US states + DC. Abbreviated — dropdowns want to show
 // the state code next to the name, so we store the 2-letter code.
 export const US_STATES = [
@@ -78,12 +106,29 @@ export const MoveDateSchema = z
 
 // ─── Step schemas ─────────────────────────────────────────────────
 
+// Latitude / longitude coming from a Google Place Details pick. Both
+// optional on the schema — manual address entries (Google "use custom"
+// fallback, PO boxes Google didn't resolve) won't have them, and the
+// rest of the pipeline degrades to old behavior in that case.
+const LatSchema = z
+  .number()
+  .min(-90)
+  .max(90)
+  .optional();
+const LngSchema = z
+  .number()
+  .min(-180)
+  .max(180)
+  .optional();
+
 // Step 1 — origin address
 export const OriginSchema = z.object({
   origin_address: z.string().trim().min(3, 'Please enter a street address'),
   origin_city: z.string().trim().min(2, 'City required'),
   origin_state: UsStateSchema,
   origin_zip: ZipSchema,
+  origin_lat: LatSchema,
+  origin_lng: LngSchema,
 });
 
 // Step 2 — destination address
@@ -92,6 +137,8 @@ export const DestinationSchema = z.object({
   destination_city: z.string().trim().min(2, 'City required'),
   destination_state: UsStateSchema,
   destination_zip: ZipSchema,
+  destination_lat: LatSchema,
+  destination_lng: LngSchema,
 });
 
 // Step 3 — move details
@@ -112,7 +159,7 @@ export const DetailsSchema = z.object({
 export const ContactSchema = z.object({
   contact_name: z.string().trim().min(2, 'Your name'),
   contact_phone: PhoneSchema,
-  contact_email: z.string().trim().toLowerCase().email('Valid email, please'),
+  contact_email: EmailSchema,
 });
 
 // ─── Full intake ─────────────────────────────────────────────────

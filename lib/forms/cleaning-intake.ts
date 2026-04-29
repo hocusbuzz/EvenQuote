@@ -15,6 +15,7 @@ import {
   ZipSchema,
   PhoneSchema,
   UsStateSchema,
+  EmailSchema,
   HomeSizeSchema,
   HOME_SIZES,
   US_STATES,
@@ -24,6 +25,7 @@ export {
   ZipSchema,
   PhoneSchema,
   UsStateSchema,
+  EmailSchema,
   HomeSizeSchema,
   HOME_SIZES,
   US_STATES,
@@ -97,11 +99,19 @@ export const EarliestDateSchema = z
 // ─── Step schemas ─────────────────────────────────────────────────
 
 // Step 1 — where to clean.
+//
+// Optional `lat` / `lng` come from a Google Place Details pick — the
+// address-autocomplete component returns them via onSelectAddress.
+// Both nullable on the schema because manual ("use custom") entries
+// won't have them. Used downstream by the on-demand business seeder
+// + the radius selector in lib/calls/select-businesses.ts.
 export const LocationSchema = z.object({
   address: z.string().trim().min(3, 'Please enter a street address'),
   city: z.string().trim().min(2, 'City required'),
   state: UsStateSchema,
   zip: ZipSchema,
+  lat: z.number().min(-90).max(90).optional(),
+  lng: z.number().min(-180).max(180).optional(),
 });
 
 // Step 2 — about the home.
@@ -133,7 +143,7 @@ export const ServiceSchema = z.object({
 export const ContactSchema = z.object({
   contact_name: z.string().trim().min(2, 'Your name'),
   contact_phone: PhoneSchema,
-  contact_email: z.string().trim().toLowerCase().email('Valid email, please'),
+  contact_email: EmailSchema,
 });
 
 // ─── Full intake ─────────────────────────────────────────────────

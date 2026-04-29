@@ -90,10 +90,53 @@ export async function releaseContactToBusiness(
     };
   }
 
-  // 2. Context load. Service-role client because we need to reach
-  // businesses.email (which is not exposed via authenticated RLS) and
-  // we want a single consistent view for rendering the email.
+  // Defense-in-depth against the "send OK, stamp failed" double-send race.
+  //
+  // The happy-path order below is: send email → insert audit row (with
+  // email_send_id) → stamp quotes.contact_released_at. If the final stamp
+  // fails (DB blip, RLS hiccup), a retry would see contact_released_at
+  // still NULL and re-send the PII to the business — a second, identical
+  // lead email is both annoying and, worse, a silent duplicate PII
+  // disclosure the customer never consented to.
+  //
+  // The audit row IS the source of truth for "did the email already go
+  // out". It is inserted with a non-null email_send_id only on the
+  // success path (the failure path inserts a row with email_error set
+  // but email_send_id null). So: if we find a row for this quote with
+  // email_send_id IS NOT NULL, the send already happened — short-circuit
+  // as if already-released, and best-effort re-stamp contact_released_at
+  // so subsequent calls take the cheap early-return path above.
+  //
+  // This check intentionally runs BEFORE the expensive context load
+  // and before composing/sending any email.
   const admin = createAdminClient();
+
+  const { data: priorSend } = await admin
+    .from('quote_contact_releases')
+    .select('id, email_send_id')
+    .eq('quote_id', quoteId)
+    .not('email_send_id', 'is', null)
+    .maybeSingle();
+  if (priorSend?.email_send_id) {
+    // Repair the missing stamp (best-effort — failure here is fine,
+    // because this same pre-check will catch the next retry).
+    const { error: repairErr } = await admin
+      .from('quotes')
+      .update({ contact_released_at: new Date().toISOString() })
+      .eq('id', quoteId)
+      .is('contact_released_at', null);
+    if (repairErr) {
+      log.warn('contact_released_at repair failed (non-fatal)', {
+        err: repairErr,
+        quoteId,
+      });
+    }
+    return {
+      ok: true,
+      alreadyReleased: true,
+      releaseId: priorSend.id,
+    };
+  }
 
   const { data: quote, error: quoteErr } = await admin
     .from('quotes')
@@ -291,16 +334,17 @@ function summarizeIntake(intake: Record<string, unknown>): string[] {
   // Cleaning-style
   const cleaningType = stringOrNull(intake['cleaning_type']);
   if (cleaningType) bullets.push(`Type: ${cleaningType}`);
-  const bedrooms = intake['bedrooms'];
-  const bathrooms = intake['bathrooms'];
-  if (typeof bedrooms === 'number' || typeof bathrooms === 'number') {
-    bullets.push(
-      `${bedrooms ?? '?'} bed / ${bathrooms ?? '?'} bath`
-    );
-  }
+  // `bathrooms` is a BathroomsSchema enum string ('1', '1.5', ..., '4+')
+  // per lib/forms/cleaning-intake.ts — surface it when present.
+  // (An earlier version also read `bedrooms`, which is NOT in either
+  //  Zod schema; that was silent drift. Removed R41(b).)
+  const bathrooms = stringOrNull(intake['bathrooms']);
+  if (bathrooms) bullets.push(`${bathrooms} bath`);
 
-  // Generic notes field — if present, add once.
-  const notes = stringOrNull(intake['notes']);
+  // Generic notes field — if present, add once. Canonical key is
+  // `additional_notes` per both intake Zod schemas. Earlier versions
+  // read `intake['notes']` which was always undefined; fixed in R41(b).
+  const notes = stringOrNull(intake['additional_notes']);
   if (notes) bullets.push(notes.slice(0, 180));
 
   // Always cap at 5 bullets so the email stays readable.

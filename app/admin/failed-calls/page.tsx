@@ -71,7 +71,7 @@ export default async function FailedCallsPage() {
     .limit(200);
 
   if (error) {
-    log.error('query failed', { err: error.message });
+    log.error('query failed', { err: error });
   }
 
   const calls: FailedCall[] = (rows ?? []).map((r) => {
@@ -89,7 +89,9 @@ export default async function FailedCallsPage() {
       <SiteNavbar />
       <main className="container max-w-6xl py-12">
         <header className="mb-8">
-          <p className="label-eyebrow mb-2">Admin</p>
+          <p className="label-eyebrow mb-2">
+            <Link href="/admin" className="hover:underline">Admin</Link> / Failed calls
+          </p>
           <h1 className="font-display text-3xl font-bold tracking-tight">
             Dead letter queue
           </h1>

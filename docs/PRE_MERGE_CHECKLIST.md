@@ -39,7 +39,7 @@ These are documented rather than patched; re-evaluate monthly.
 
 | Package | Severity | Fix | Decision |
 | --- | --- | --- | --- |
-| next 14.2.35 (4 advisories) | High | `next@16` (breaking) | Open — see `docs/DAILY_REPORT_2026-04-22.md` Action #1 |
+| next 14.2.35 (4 advisories) | High | `next@16` (breaking) | Open — see `docs/daily-reports/DAILY_REPORT_2026-04-22.md` Action #1 |
 | eslint-config-next 14.2.15 | High (dev only) | `eslint-config-next@16` | Dev only, bundled with next bump |
 | glob (via eslint-config-next) | High (dev only) | upstream | Dev only, not reachable at runtime |
 | uuid <14 (via resend → svix) | Moderate | Upstream `resend` | Blocked on resend publishing fix |

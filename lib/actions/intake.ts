@@ -30,8 +30,32 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { createLogger } from '@/lib/logger';
+import { captureException } from '@/lib/observability/sentry';
 
 const log = createLogger('submitMovingIntake');
+
+// ── Canonical Sentry tag shape for this lib ──
+// Mirrors the R28 checkout.ts / R26 extract-quote.ts convention of a
+// lib+reason tag pair, with `vertical` to distinguish moving/cleaning
+// in Sentry facets. If intake starts failing for one vertical only,
+// a merged reason would mask that — a category_id rename on a single
+// category table row would hit only one surface.
+//
+// Reasons:
+//   - categoryLookupFailed  → DB error while selecting service_categories.
+//     NOT raised when the row simply doesn't match filters (is_active=false,
+//     renamed slug) — that's a config state, not an incident, and capturing
+//     it would flood Sentry on intentional category pauses.
+//   - insertFailed          → quote_requests insert returned an error.
+//     RLS-deny, schema drift, check-constraint violation — all worth an alert.
+//     User-facing message stays generic ("Could not save..."); tag carries
+//     the telemetry without leaking to the page.
+//
+// PII contract: tags carry `{lib, reason, vertical}` only. No user_id,
+// no email, no phone, no address — Sentry tags are search-indexed and
+// the blast radius of a tag-level PII leak is wider than a message
+// leak. See resend.ts for the same contract.
+export type IntakeReason = 'categoryLookupFailed' | 'insertFailed';
 
 export type SubmitResult =
   | { ok: true; requestId: string }
@@ -81,6 +105,18 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
 
   if (catErr || !category) {
     log.error('moving category not found', { err: catErr });
+    // Only capture when the DB returned an error. Missing-row (RLS filter
+    // mismatch, is_active=false) is a config state, not an incident —
+    // capturing it would flood on intentional category pauses.
+    if (catErr) {
+      const msg =
+        catErr && typeof catErr === 'object' && 'message' in catErr
+          ? String((catErr as { message: unknown }).message)
+          : String(catErr);
+      captureException(new Error(`intake categoryLookupFailed: ${msg}`), {
+        tags: { lib: 'intake', reason: 'categoryLookupFailed', vertical: 'moving' },
+      });
+    }
     return { ok: false, error: 'Moving category is unavailable. Please try again.' };
   }
 
@@ -92,6 +128,12 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
   // they're moving to, which is also a reasonable default for "where
   // should we show you searchable businesses". (We also keep origin_zip
   // inside intake_data.)
+  //
+  // origin_lat/lng on quote_requests = destination coords for movers,
+  // because the call engine seeds + selects businesses around the
+  // service location, not where the customer is moving from. Both
+  // nullable — manual address entries can lack them and the seeder
+  // falls back to a city-name geocoded query.
   const { data: inserted, error: insertErr } = await admin
     .from('quote_requests')
     .insert({
@@ -102,12 +144,26 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
       city: data.destination_city,
       state: data.destination_state,
       zip_code: data.destination_zip,
+      origin_lat: data.destination_lat ?? null,
+      origin_lng: data.destination_lng ?? null,
     })
     .select('id')
     .single();
 
   if (insertErr || !inserted) {
     log.error('insert failed', { err: insertErr, userId: user?.id ?? null });
+    // Insert failures are always worth an alert — RLS/schema/constraint
+    // drift all manifest here and silently return "Could not save" to
+    // the user with zero operator visibility pre-R29.
+    const msg =
+      insertErr && typeof insertErr === 'object' && 'message' in insertErr
+        ? String((insertErr as { message: unknown }).message)
+        : insertErr
+          ? String(insertErr)
+          : 'insert returned no row';
+    captureException(new Error(`intake insertFailed: ${msg}`), {
+      tags: { lib: 'intake', reason: 'insertFailed', vertical: 'moving' },
+    });
     return { ok: false, error: 'Could not save your request. Please try again.' };
   }
 
