@@ -43,6 +43,11 @@ import { SkipPaymentButton } from '@/components/checkout/skip-payment-button';
 import { QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
 import { maskEmail } from '@/lib/text/pii';
 
+// Per-request SSR. Reads quote_request by uuid from search params and
+// redirects when already-paid — must run fresh on every visit, not be
+// statically baked.
+export const dynamic = 'force-dynamic';
+
 // Transactional page keyed on a UUID — noindex so guessable URLs don't
 // surface in search. Title is the browser-tab title, still friendly.
 export const metadata: Metadata = {

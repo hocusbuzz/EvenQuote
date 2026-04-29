@@ -23,6 +23,11 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// requireUser() reads cookies, so Next.js usually SSRs this anyway —
+// declared explicitly to defend against any future refactor that strips
+// the cookie read and accidentally lets the build statically generate.
+export const dynamic = 'force-dynamic';
+
 type RequestRow = {
   id: string;
   status: string;

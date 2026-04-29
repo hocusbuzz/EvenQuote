@@ -29,6 +29,11 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Per-request SSR. requireUser() + cookie-bound client already trigger
+// SSR, but mark explicitly so a refactor doesn't accidentally let
+// quote-detail pages get statically baked at build time.
+export const dynamic = 'force-dynamic';
+
 type QuoteRow = {
   id: string;
   business_id: string;

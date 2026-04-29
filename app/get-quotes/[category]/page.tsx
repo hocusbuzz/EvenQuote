@@ -20,6 +20,12 @@ import { IntakeFormShell } from '@/components/get-quotes/form-shell';
 import { CleaningFormShell } from '@/components/get-quotes/cleaning-form-shell';
 import { WaitlistCapture } from '@/components/get-quotes/waitlist-capture';
 
+// Force per-request SSR. Without this, Next.js may statically generate the
+// page at build time. If the build sandbox can't reach Supabase, the
+// resulting page will 404 every category forever (we 404 on miss). Sibling
+// /get-quotes/page.tsx hit the same staleness bug at launch.
+export const dynamic = 'force-dynamic';
+
 // Map of slug → live intake shell. Anything not in here renders the
 // waitlist capture using the category's name + description.
 const LIVE_FORMS: Record<string, React.ComponentType> = {

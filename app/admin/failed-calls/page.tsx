@@ -27,6 +27,11 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Per-request SSR — admin DLQ surface needs to reflect live state.
+// requireAdmin() reads cookies (already triggers SSR) but we mark
+// explicit to defend against refactor drift.
+export const dynamic = 'force-dynamic';
+
 type FailedCall = {
   id: string;
   quote_request_id: string;

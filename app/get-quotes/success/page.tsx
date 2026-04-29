@@ -55,6 +55,11 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Per-request SSR. Reads quote_request status (paid → calling → ready)
+// and shows live progress. Static caching here would freeze the
+// "still processing" state forever for early viewers.
+export const dynamic = 'force-dynamic';
+
 type Props = {
   searchParams: { session_id?: string; request?: string };
 };
