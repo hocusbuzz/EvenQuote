@@ -14,11 +14,16 @@
 // going through HTTP.
 //
 // Flow each run:
-//   1. Find quote_requests with status='processing'. Phase 7's
-//      apply_call_end() flips a request into 'processing' once
-//      total_calls_completed catches the planned batch size — that's
-//      our signal that the call list is exhausted and it's time to
-//      send the customer their report.
+//   1. Find quote_requests with status IN ('processing', 'completed')
+//      AND report_sent_at IS NULL. Phase 7's apply_call_end() flips
+//      a request into 'processing' once total_calls_completed catches
+//      the planned batch size — but in some flows (end-of-call webhook
+//      shortcut, manual admin transitions) a request can move straight
+//      from 'calling' → 'completed' without ever hitting 'processing'.
+//      Such rows would be invisible to this cron forever, leaving
+//      zero-quote requests un-refunded. Including 'completed' rows
+//      (filtered to report_sent_at IS NULL so we never re-process
+//      already-reported rows) catches both paths. (#110 fix)
 //   2. For each request: load the quotes + join business names.
 //   3. If zero quotes landed, automatically refund the $9.99 via
 //      Stripe (idempotency key = `refund-zero-quotes-<paymentId>`,
@@ -156,7 +161,16 @@ export async function sendPendingReports(
       category:service_categories!quote_requests_category_id_fkey(name, slug)
     `
     )
-    .eq('status', 'processing')
+    // #110 fix: include 'completed' rows alongside 'processing' so we
+    // pick up requests that transitioned straight from 'calling' →
+    // 'completed' (which can happen via the end-of-call webhook flow)
+    // without ever hitting 'processing'. Such rows would otherwise be
+    // invisible to this cron forever — and if they have 0 quotes, the
+    // customer never gets a refund. The `report_sent_at IS NULL` filter
+    // below still prevents double-processing of rows we've already
+    // reported on (or already refunded), so widening the status set
+    // is safe.
+    .in('status', ['processing', 'completed'])
     .is('report_sent_at', null)
     .order('created_at', { ascending: true })
     .limit(MAX_PER_RUN);
