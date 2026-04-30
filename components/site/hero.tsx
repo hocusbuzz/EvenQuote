@@ -182,7 +182,7 @@ export function Hero() {
                 Your quote report
               </p>
               <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                3 of 10
+                3 of 5
               </p>
             </div>
             <ul className="mt-3 space-y-2.5">

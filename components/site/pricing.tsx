@@ -12,7 +12,7 @@ import { Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const includes = [
-  'Up to 10 calls to local pros',
+  'Up to 5 calls to local pros',
   'Structured price range from each business',
   'Availability check for your move date',
   'What\'s included: movers, truck size, insurance',

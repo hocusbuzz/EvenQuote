@@ -25,7 +25,7 @@ const faqs = [
   },
   {
     q: 'What if businesses don\'t pick up?',
-    a: "We retry no-answers twice, spaced out. We typically reach 6-8 of the 10 we dial — which is still way more than you'd realistically call yourself. The report tells you who we reached, who we didn't, and why.",
+    a: "We retry no-answers twice, spaced out. We typically reach 3-4 of the 5 we dial — which is still way more than you'd realistically call yourself. The report tells you who we reached, who we didn't, and why.",
   },
   {
     q: 'Do the businesses know it\'s an AI?',

@@ -42,7 +42,7 @@ const METADATA_BASE = new URL(
 export const metadata: Metadata = {
   metadataBase: METADATA_BASE,
   title: {
-    default: 'EvenQuote — Get 10 real quotes in an hour, not a week',
+    default: 'EvenQuote — Get real quotes in an hour, not a week',
     template: '%s | EvenQuote',
   },
   description:
@@ -75,14 +75,14 @@ export const metadata: Metadata = {
     type: 'website',
     locale: 'en_US',
     url: '/',
-    title: 'EvenQuote — Get 10 real quotes in an hour',
+    title: 'EvenQuote — Get real quotes in an hour',
     description:
       'We dial local pros for you. You get a clean comparison report in your inbox. $9.99 flat.',
     siteName: 'EvenQuote',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'EvenQuote — Get 10 real quotes in an hour',
+    title: 'EvenQuote — Get real quotes in an hour',
     description:
       'AI-powered quote collection from local service providers. $9.99 flat.',
   },
