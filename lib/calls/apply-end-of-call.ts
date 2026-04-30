@@ -127,7 +127,15 @@ export async function applyEndOfCall(
     .update({
       status: outcome.status,
       ended_at: new Date().toISOString(),
-      duration_seconds: report.durationSeconds ?? null,
+      // Vapi sends `durationSeconds` as a float (e.g. 126.226 → 126.226s).
+      // Our `calls.duration_seconds` column is INTEGER, so Postgres
+      // rejects the float with "invalid input syntax for type integer".
+      // Round to the nearest second — sub-second precision isn't useful
+      // for billing, dashboards, or reporting.
+      duration_seconds:
+        report.durationSeconds === null || report.durationSeconds === undefined
+          ? null
+          : Math.round(report.durationSeconds),
       transcript: report.transcript ?? null,
       recording_url: report.recordingUrl ?? null,
       summary: report.summary ?? null,
