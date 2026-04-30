@@ -155,6 +155,7 @@ describe('HomeSchema (Step 2)', () => {
     const r = HomeSchema.safeParse({
       home_size: '2 bedroom',
       bathrooms: '1.5',
+      square_footage_range: '1,200–1,800 sqft',
       pets: 'Dogs',
     });
     expect(r.success).toBe(true);
@@ -164,6 +165,7 @@ describe('HomeSchema (Step 2)', () => {
     const r = HomeSchema.safeParse({
       home_size: '1 bedroom',
       bathrooms: '1',
+      square_footage_range: 'Under 800 sqft',
     });
     expect(r.success).toBe(true);
     if (r.success) expect(r.data.pets).toBeUndefined();
@@ -176,10 +178,29 @@ describe('HomeSchema (Step 2)', () => {
     const r = HomeSchema.safeParse({
       home_size: '1 bedroom',
       bathrooms: '1',
+      square_footage_range: '800–1,200 sqft',
       pets: '',
     });
     expect(r.success).toBe(true);
     if (r.success) expect(r.data.pets).toBeUndefined();
+  });
+
+  // #114 — square_footage_range is mandatory.
+  it('rejects missing square_footage_range', () => {
+    const r = HomeSchema.safeParse({
+      home_size: '2 bedroom',
+      bathrooms: '2',
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects an unknown square_footage_range value', () => {
+    const r = HomeSchema.safeParse({
+      home_size: '2 bedroom',
+      bathrooms: '2',
+      square_footage_range: '500 sqft',
+    });
+    expect(r.success).toBe(false);
   });
 });
 
@@ -286,6 +307,7 @@ describe('CleaningIntakeSchema (full intake)', () => {
       zip: '62704',
       home_size: '3 bedroom',
       bathrooms: '2',
+      square_footage_range: '1,800–2,500 sqft',
       pets: 'Dogs',
       cleaning_type: 'Standard',
       frequency: 'Every two weeks',

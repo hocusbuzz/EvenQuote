@@ -19,6 +19,7 @@ import {
   US_STATES,
   HOME_SIZES,
   BATHROOMS,
+  SQUARE_FOOTAGE_RANGES,
   PET_OPTIONS,
   CLEANING_TYPES,
   CLEANING_FREQUENCIES,
@@ -200,6 +201,7 @@ export function HomeStep({ onNext, onBack }: StepProps) {
     const data = {
       home_size: draft.home_size,
       bathrooms: draft.bathrooms,
+      square_footage_range: draft.square_footage_range,
       pets: draft.pets,
     };
     if (validate(data)) onNext();
@@ -261,6 +263,41 @@ export function HomeStep({ onNext, onBack }: StepProps) {
               {BATHROOMS.map((b) => (
                 <SelectItem key={b} value={b}>
                   {b}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FormField>
+
+        {/*
+          Square footage range — required (#114). Cleaners need sqft
+          to quote accurately; "X bedroom" alone is too coarse. Range
+          buckets so customers don't need to know exact sqft.
+        */}
+        <FormField
+          label="Approximate square footage"
+          htmlFor="square_footage_range"
+          required
+          hint="Cleaners use this to quote accurately. Pick the closest range."
+          error={errors.square_footage_range}
+        >
+          <Select
+            value={draft.square_footage_range ?? undefined}
+            onValueChange={(v) => {
+              setField(
+                'square_footage_range',
+                v as (typeof SQUARE_FOOTAGE_RANGES)[number],
+              );
+              clearError('square_footage_range');
+            }}
+          >
+            <SelectTrigger id="square_footage_range">
+              <SelectValue placeholder="Select a range" />
+            </SelectTrigger>
+            <SelectContent>
+              {SQUARE_FOOTAGE_RANGES.map((r) => (
+                <SelectItem key={r} value={r}>
+                  {r}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -559,7 +596,12 @@ export function ReviewStep({ onBack, onSubmit, submitting }: StepProps) {
         firstError === 'zip'
       )
         setStep('location');
-      else if (firstError === 'home_size' || firstError === 'bathrooms' || firstError === 'pets')
+      else if (
+        firstError === 'home_size' ||
+        firstError === 'bathrooms' ||
+        firstError === 'square_footage_range' ||
+        firstError === 'pets'
+      )
         setStep('home');
       else if (firstError.startsWith('contact')) setStep('contact');
       else setStep('service');
@@ -583,6 +625,7 @@ export function ReviewStep({ onBack, onSubmit, submitting }: StepProps) {
       lines: [
         draft.home_size,
         draft.bathrooms ? `${draft.bathrooms} bathroom(s)` : undefined,
+        draft.square_footage_range,
         draft.pets && draft.pets !== 'None' ? `Pets: ${draft.pets}` : undefined,
       ],
     },

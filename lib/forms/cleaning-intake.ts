@@ -79,6 +79,22 @@ export const CLEANING_EXTRAS = [
 ] as const;
 export const CleaningExtraSchema = z.enum(CLEANING_EXTRAS);
 
+// Square footage range — added in #114. "X bedroom" alone tells a
+// cleaner almost nothing about price (a 2BR can be 800 sqft or 2,200
+// sqft). We ask for a range bucket because most customers don't know
+// exact sqft of rentals/condos but can pick a bucket. Surfaced to the
+// AI assistant as `square_footage_range` so the contractor can quote
+// more accurately on the first call.
+export const SQUARE_FOOTAGE_RANGES = [
+  'Under 800 sqft',
+  '800–1,200 sqft',
+  '1,200–1,800 sqft',
+  '1,800–2,500 sqft',
+  '2,500–3,500 sqft',
+  '3,500+ sqft',
+] as const;
+export const SquareFootageRangeSchema = z.enum(SQUARE_FOOTAGE_RANGES);
+
 // ─── Dates ────────────────────────────────────────────────────────
 
 // Accepts ISO yyyy-mm-dd from <input type="date">. Must be today or
@@ -117,9 +133,12 @@ export const LocationSchema = z.object({
 // Step 2 — about the home.
 // `pets` is optional per the seed (required:false), so we accept an
 // empty-string transform to undefined for the form's raw state.
+// `square_footage_range` is mandatory (#114) — see SQUARE_FOOTAGE_RANGES
+// above for rationale.
 export const HomeSchema = z.object({
   home_size: HomeSizeSchema,
   bathrooms: BathroomsSchema,
+  square_footage_range: SquareFootageRangeSchema,
   pets: PetsSchema.optional().or(z.literal('').transform(() => undefined)),
 });
 
