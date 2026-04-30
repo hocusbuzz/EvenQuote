@@ -237,15 +237,18 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
       // Vapi's `/call` endpoint rejects `server` at the body root
       // ("property server should not exist") — it must be nested inside
       // `assistantOverrides`, alongside the other per-call assistant
-      // settings (voicemailMessage, maxDurationSeconds, etc.). The
-      // header shape is what `lib/security/vapi-auth.ts:extractVapiSecret`
-      // already accepts (`Authorization: Bearer <secret>`). No route
-      // changes needed — only the dispatch side.
+      // settings (voicemailMessage, maxDurationSeconds, etc.).
+      //
+      // Use `server.secret` (NOT `server.headers.Authorization`):
+      // we discovered Vapi silently drops `assistantOverrides.server.headers`
+      // — webhooks arrived with only `Content-Type` and `Accept-Encoding`,
+      // no Authorization. But Vapi DOES honor `server.secret`, which it
+      // forwards as the `x-vapi-secret` header on every webhook delivery.
+      // `lib/security/vapi-auth.ts:extractVapiSecret` already accepts
+      // `x-vapi-secret`, so no route changes needed.
       server: {
         url: `${process.env.NEXT_PUBLIC_APP_URL ?? ''}/api/vapi/webhook`,
-        headers: {
-          Authorization: `Bearer ${process.env.VAPI_WEBHOOK_SECRET ?? ''}`,
-        },
+        secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
       },
     },
     metadata: input.metadata,
