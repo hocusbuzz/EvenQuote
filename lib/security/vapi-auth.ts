@@ -47,21 +47,45 @@ export type VerifyVapiWebhookResult =
   | { ok: false; error: string };
 
 /**
- * Extract the Vapi-provided secret from a webhook request's headers.
+ * Extract the Vapi-provided secret from a webhook request.
  *
  * Exported separately so tests and a future logger can inspect what
  * the caller sent without going through the full auth dance. Returns
- * an empty string when all three headers are absent — the caller's
+ * an empty string when all four channels are absent — the caller's
  * `constantTimeEqual` check will then reject that against the
  * configured secret.
  *
- * Header precedence (exact order the old inline logic used):
- *   1. `x-vapi-secret`        — lowercased variant
- *   2. `X-Vapi-Secret`        — defensive duplicate for proxies that
- *                               don't normalize header casing
- *   3. `Authorization: Bearer …` — current "Bearer Token" credential
+ * Lookup precedence:
+ *   1. `?token=` URL query param — load-bearing fallback because Vapi
+ *      silently drops `assistantOverrides.server.headers` AND
+ *      `assistantOverrides.server.secret` from per-call configuration
+ *      (only `server.url` is honored). The smoke test on 2026-04-29
+ *      proved it: webhooks arrived with only `Content-Type` and
+ *      `Accept-Encoding` headers, no auth, even when we passed both
+ *      `server.headers.Authorization` and `server.secret`. Putting the
+ *      token in the URL guarantees Vapi can't strip it.
+ *   2. `x-vapi-secret`        — lowercased variant (assistant-level
+ *                               credential, when applied — but the
+ *                               assistant-level credential UI selection
+ *                               also doesn't propagate to webhook
+ *                               deliveries reliably).
+ *   3. `X-Vapi-Secret`        — defensive duplicate for proxies that
+ *                               don't normalize header casing.
+ *   4. `Authorization: Bearer …` — current "Bearer Token" credential
+ *                                  shape (when honored).
  */
 export function extractVapiSecret(req: Request): string {
+  // 1. URL query param — primary, since Vapi can't strip URL params.
+  let queryToken = '';
+  try {
+    queryToken = new URL(req.url).searchParams.get('token') ?? '';
+  } catch {
+    // URL parse failures shouldn't blow up auth — fall through to
+    // header-based lookups.
+  }
+  if (queryToken) return queryToken;
+
+  // 2-4. Header-based lookups (legacy / belt-and-suspenders).
   const bearer = (req.headers.get('authorization') ?? '').replace(
     /^Bearer\s+/i,
     '',

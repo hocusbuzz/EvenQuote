@@ -234,21 +234,31 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
       // entire batch (including a real \$249 quote captured by the AI
       // from "North County San Diego House Cleaning").
       //
+      // Per-call server override: route Vapi webhook deliveries to OUR
+      // `/api/vapi/webhook` endpoint, with auth in the URL.
+      //
       // Vapi's `/call` endpoint rejects `server` at the body root
       // ("property server should not exist") — it must be nested inside
-      // `assistantOverrides`, alongside the other per-call assistant
-      // settings (voicemailMessage, maxDurationSeconds, etc.).
+      // `assistantOverrides`. But the smoke test on 2026-04-29 proved
+      // that Vapi silently DROPS `server.headers` and `server.secret`
+      // from `assistantOverrides`. Only `server.url` propagates. So
+      // putting the token in the URL is the only reliable way to
+      // authenticate per-call webhooks.
       //
-      // Use `server.secret` (NOT `server.headers.Authorization`):
-      // we discovered Vapi silently drops `assistantOverrides.server.headers`
-      // — webhooks arrived with only `Content-Type` and `Accept-Encoding`,
-      // no Authorization. But Vapi DOES honor `server.secret`, which it
-      // forwards as the `x-vapi-secret` header on every webhook delivery.
-      // `lib/security/vapi-auth.ts:extractVapiSecret` already accepts
-      // `x-vapi-secret`, so no route changes needed.
+      // The route's `extractVapiSecret` (lib/security/vapi-auth.ts)
+      // checks `?token=` first, so this works without any other
+      // server-side change. The token is the same value as
+      // VAPI_WEBHOOK_SECRET — only its transport changes.
+      //
+      // PII / log-leak concern: Vercel access logs DO record full URLs
+      // including query strings, so the secret could land in logs. We
+      // accept this trade-off because (a) the secret is high-entropy
+      // (64 hex chars), (b) Vercel access logs are scoped to project
+      // members only, and (c) the alternative (no auth) is worse —
+      // unauthenticated webhooks are a privilege-escalation surface
+      // into the service-role Supabase client.
       server: {
-        url: `${process.env.NEXT_PUBLIC_APP_URL ?? ''}/api/vapi/webhook`,
-        secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
+        url: `${process.env.NEXT_PUBLIC_APP_URL ?? ''}/api/vapi/webhook?token=${encodeURIComponent(process.env.VAPI_WEBHOOK_SECRET ?? '')}`,
       },
     },
     metadata: input.metadata,
