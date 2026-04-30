@@ -306,7 +306,7 @@ export default async function SuccessPage({ searchParams }: Props) {
               <div className="mt-6 rounded-md border border-border bg-muted/40 p-4 text-sm relative z-10">
                 <p className="font-semibold text-foreground">What happens next</p>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
-                  <li>We call up to 10 local {noun} on your behalf.</li>
+                  <li>We call up to 5 local {noun} on your behalf.</li>
                   <li>Each call is recorded and transcribed.</li>
                   <li>We extract pricing, availability, and notes.</li>
                   <li>You get a single report to compare — no phone tag.</li>

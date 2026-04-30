@@ -142,10 +142,10 @@ describe('validateServerEnv', () => {
 });
 
 describe('getCallBatchSize', () => {
-  it('defaults to 10 when unset', async () => {
+  it('defaults to 5 when unset (#111)', async () => {
     delete process.env.CALL_BATCH_SIZE;
     const mod = await import('./env');
-    expect(mod.getCallBatchSize()).toBe(10);
+    expect(mod.getCallBatchSize()).toBe(5);
   });
 
   it('parses and floors a valid value', async () => {
@@ -154,10 +154,10 @@ describe('getCallBatchSize', () => {
     expect(mod.getCallBatchSize()).toBe(7);
   });
 
-  it('falls back to 10 on an unparseable runtime value', async () => {
+  it('falls back to 5 on an unparseable runtime value (#111)', async () => {
     process.env.CALL_BATCH_SIZE = 'garbage';
     const mod = await import('./env');
-    expect(mod.getCallBatchSize()).toBe(10);
+    expect(mod.getCallBatchSize()).toBe(5);
   });
 });
 

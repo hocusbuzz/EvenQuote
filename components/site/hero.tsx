@@ -136,7 +136,7 @@ export function Hero() {
                 <span className="align-super text-3xl xl:text-4xl">⁹⁹</span>
               </p>
               <p className="mt-4 max-w-[18ch] font-display text-base italic text-ink">
-                up to 10 calls, one report
+                up to 5 calls, one report
               </p>
               <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/60">
                 + tax if applicable

@@ -26,11 +26,18 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # Env (never commit real secrets)
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# Broad-match all .env* variants so a careless `git add -A` can't sweep
+# up backups, dev copies, or one-off renames. Then EXEMPT the template
+# (.env.example) which is meant to be tracked.
+.env*
+!.env.example
+
+# Common backup/duplicate patterns that have leaked secrets in the past:
+#   .env.local.backup, .env.local.bak — manual saves before edits
+#   "package-lock 2.json" — macOS Finder "Keep Both" duplicate
+*.bak
+*.backup
+* 2.*
 
 # Vercel
 .vercel

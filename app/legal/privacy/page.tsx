@@ -192,6 +192,16 @@ export default function PrivacyPage() {
         the businesses we call, and to record and transcribe those calls
         for the purposes listed above.
       </p>
+      <p>
+        Specifically, the AI assistant we send to a service provider on your
+        behalf <strong>does not have access to and will not disclose</strong>{' '}
+        your first or last name, your phone number, your email address, or
+        your street address. We strip these fields at the dispatch boundary
+        before any call is placed. The provider only learns your service
+        area (city, state, zip code) and the job specifics you entered
+        (home size, dates, notes). If a provider asks the AI for any of
+        the above, the AI is instructed to refuse.
+      </p>
 
       <h2>Who we share it with</h2>
       <p>

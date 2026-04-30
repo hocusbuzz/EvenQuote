@@ -29,6 +29,7 @@
 //   the assistant never had.
 
 import { scrubPii } from '@/lib/security/scrub-pii';
+import { expandStateAbbr } from './state-name';
 
 // Minimal shape of a quote_request row needed for variable construction.
 // Re-declared locally so this module doesn't depend on the broader
@@ -136,7 +137,11 @@ export function buildSafeVariableValues(
   //    directly (not in intake_data) for cleaning/handyman/lawn-care.
   //    Always safe to surface.
   out.city = qr.city ?? null;
-  out.state = qr.state ?? null;
+  // Expand "CA" → "California" so the assistant TTS reads the state
+  // naturally instead of letter-by-letter ("see-ay"). See
+  // lib/calls/state-name.ts for the full mapping. Idempotent on
+  // already-expanded values; passes through unknown codes unchanged.
+  out.state = qr.state ? expandStateAbbr(qr.state) : null;
   out.zip_code = qr.zip_code ?? null;
 
   return out;

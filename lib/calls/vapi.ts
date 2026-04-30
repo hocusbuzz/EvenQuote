@@ -156,12 +156,15 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
   // `assistantOverrides`, so they take effect on top of whatever the
   // base assistant is configured with in the Vapi dashboard.
   //
-  //   • maxDurationSeconds: 120 — hard cap at 2 minutes. Prevents a
-  //     runaway conversation (chatty owner, chatty LLM, stuck-on-hold
-  //     call) from burning 5+ minutes of Vapi + Twilio minutes.
-  //   • silenceTimeoutSeconds: 20 — if nobody speaks for 20s, hang up.
-  //     Catches hold music, forgotten calls, abandoned voicemails that
-  //     don't trigger voicemail detection.
+  //   • maxDurationSeconds: 360 — hard cap at 6 minutes (#113 — bumped
+  //     from 240s after launch data showed engaged contractors walking
+  //     through line-item pricing routinely run 5+ minutes). Backstop
+  //     only — assistant prompt has end-criteria so it ends earlier
+  //     when it has price + availability + scope.
+  //   • silenceTimeoutSeconds: 12 — if nobody speaks for 12s, hang up
+  //     (#112 — bumped from 20s to catch IVR pauses faster). Catches
+  //     hold music, forgotten calls, IVR menus that loop, abandoned
+  //     voicemails that don't trigger Vapi's voicemail detector.
   //   • voicemailDetectionEnabled: true + voicemailMessage — when Vapi
   //     detects an answering machine, speak a short templated recap
   //     (who's calling, why, callback/SMS number) and hang up. Every
@@ -204,15 +207,23 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
         ...input.variableValues,
         business_name: input.businessName,
       },
-      // All-in ceiling on call time. 4 minutes (240s) is long enough
-      // that a real, productive conversation with a contractor who
-      // walks through 2–3 scope clarifications and leaves a price
-      // range doesn't get truncated mid-sentence. Shorter caps were
-      // cutting off useful conversations right as the contractor was
-      // about to answer the price question.
-      maxDurationSeconds: 240,
-      // If either side goes quiet for 20s, end the call.
-      silenceTimeoutSeconds: 20,
+      // All-in ceiling on call time. 6 minutes (360s) — bumped from
+      // 240s in #113 after launch data showed engaged contractors
+      // walking through line-item pricing routinely run 5+ minutes.
+      // The assistant prompt has end-criteria ("end as soon as you
+      // have price + availability + scope") so it ends EARLIER than
+      // 360s on most calls; the cap is a backstop, not the target.
+      // Worst-case Vapi cost: 360s × ~$0.15/min × 5 dialed = ~$4.50
+      // per request, healthy margin against $9.99 revenue.
+      maxDurationSeconds: 360,
+      // Voicemail / IVR / human-no-engagement guard. If nobody speaks
+      // for 12s, end the call. Bumped DOWN from 20s in #112 because
+      // most IVR menus pause for ~10s after the menu plays before
+      // looping back; 12s catches that without false-firing on a
+      // human who's just thinking. Combined with voicemailDetection-
+      // Enabled below, an IVR call now ends in ~15-20s instead of the
+      // old ~30-40s, saving ~$0.15 per IVR-bounced call.
+      silenceTimeoutSeconds: 12,
       // Voicemail handling: when Vapi detects an answering machine,
       // it speaks `voicemailMessage` and then ends the call on its own.
       // We previously also passed `endCallAfterSpokenEnabled: true`

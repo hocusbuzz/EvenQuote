@@ -65,12 +65,15 @@ const ServerEnvSchema = z.object({
   // ─── Business ingest (optional) ────────────────────────────────
   GOOGLE_PLACES_API_KEY: z.string().optional(),
 
-  // ─── Call batch size (optional; default 10) ────────────────────
+  // ─── Call batch size (optional; default 5) ─────────────────────
   // Parsed with a coercion + bounds check so a bad value fails at boot
   // rather than at first enqueue. Max 20 — Vapi's per-request cost and
-  // our cron retry design don't make sense above this. Default bumped
-  // from 5 → 10 after pre-launch product sizing: 5 was too thin a
-  // sample for a "side-by-side comparison" report to feel comprehensive.
+  // our cron retry design don't make sense above this. Default reduced
+  // 10 → 5 (#111) after launch cost analysis: at $0.20-0.50 per call
+  // × 10 calls = up to $5 worst-case on a $9.99 sale, margin was thin.
+  // 5 calls + retry-unreached's optional 5-call top-up gives the same
+  // upper bound without the worst-case cost when we don't need it.
+  // Most customers compare 3 of the quotes anyway.
   CALL_BATCH_SIZE: z
     .string()
     .optional()
@@ -229,12 +232,13 @@ export function featureReadiness(): {
 /**
  * Parse CALL_BATCH_SIZE with a sane default. Bounds are enforced by the
  * schema above; if that validation passed, the coerce-to-number here is
- * safe. Default 10 — sized to produce a comparison report that feels
- * comprehensive without blowing per-request Vapi cost.
+ * safe. Default 5 (#111) — sized to keep per-request Vapi cost bounded
+ * (~$1-2.50 worst case vs. $9.99 revenue). retry-unreached can dispatch
+ * up to 5 more on top if the first batch doesn't yield enough quotes.
  */
 export function getCallBatchSize(): number {
   const raw = process.env.CALL_BATCH_SIZE;
-  if (!raw) return 10;
+  if (!raw) return 5;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 1 && n <= 20 ? Math.floor(n) : 10;
+  return Number.isFinite(n) && n >= 1 && n <= 20 ? Math.floor(n) : 5;
 }

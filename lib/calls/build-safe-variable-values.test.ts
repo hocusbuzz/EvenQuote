@@ -173,7 +173,8 @@ describe('buildSafeVariableValues — happy-path content', () => {
   it('always sets top-level service-area fields from qr (not intake_data)', () => {
     const out = buildSafeVariableValues(qrCleaning);
     expect(out.city).toBe('San Marcos');
-    expect(out.state).toBe('CA');
+    // #115 — state is expanded from 'CA' to 'California' so TTS reads naturally.
+    expect(out.state).toBe('California');
     expect(out.zip_code).toBe('92078');
   });
 

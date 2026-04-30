@@ -358,7 +358,8 @@ describe('retryFailedCalls', () => {
     expect(args.variableValues.special_items).toBe('stairs, piano');
     // Top-level qr fields propagate so the assistant has a service area.
     expect(args.variableValues.city).toBe('San Francisco');
-    expect(args.variableValues.state).toBe('CA');
+    // #115 — state is expanded from 'CA' to 'California' for natural TTS pronunciation.
+    expect(args.variableValues.state).toBe('California');
     expect(args.variableValues.zip_code).toBe('94110');
 
     // R47.4 — TWO row updates:

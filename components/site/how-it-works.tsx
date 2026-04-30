@@ -30,7 +30,7 @@ const steps: Array<{
   {
     number: '02',
     label: 'We call',
-    title: 'We call up to 10 local pros.',
+    title: 'We call up to 5 local pros.',
     body: 'Our AI assistant dials each business, confirms availability, and pulls a real price range — not a vague "we\'ll get back to you".',
     character: 'magic',
   },

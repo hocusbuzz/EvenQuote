@@ -149,7 +149,7 @@ export default async function CheckoutPage({ searchParams }: Props) {
             Ready to make the calls.
           </h1>
           <p className="mt-3 text-muted-foreground relative z-10">
-            We&rsquo;ll ring up to <span className="font-semibold text-foreground">10 {noun}</span>{' '}
+            We&rsquo;ll ring up to <span className="font-semibold text-foreground">5 {noun}</span>{' '}
             in <span className="font-semibold text-foreground">{request.city}, {request.state}</span>{' '}
             and deliver a side-by-side quote report to{' '}
             <span className="font-semibold text-foreground">
