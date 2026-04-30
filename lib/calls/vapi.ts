@@ -225,6 +225,29 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
       voicemailDetectionEnabled: true,
       voicemailMessage,
     },
+    // Per-call `server` override: explicitly tell Vapi where to deliver
+    // webhooks AND which Bearer token to attach. We learned the hard way
+    // that the assistant-level "Authorization credential" UI selection
+    // (Advanced → Messaging → Authorization → Credential) does NOT
+    // propagate to webhook deliveries — Vapi sent webhooks to
+    // /api/vapi/webhook with NO Authorization header, our route returned
+    // 401, and end-of-call data was silently dropped for an entire batch.
+    //
+    // Setting `server.url` + `server.headers.Authorization` per call
+    // makes the auth contract unambiguous: every call we dispatch carries
+    // its own auth, independent of whatever the assistant is configured
+    // with in the dashboard. If somebody re-points the assistant's
+    // server.url for a demo, we don't lose webhooks for outbound calls.
+    //
+    // The header shape is what `lib/security/vapi-auth.ts:extractVapiSecret`
+    // already accepts (`Authorization: Bearer <secret>`). No route changes
+    // needed — only the dispatch side.
+    server: {
+      url: `${process.env.NEXT_PUBLIC_APP_URL ?? ''}/api/vapi/webhook`,
+      headers: {
+        Authorization: `Bearer ${process.env.VAPI_WEBHOOK_SECRET ?? ''}`,
+      },
+    },
     metadata: input.metadata,
   };
 
