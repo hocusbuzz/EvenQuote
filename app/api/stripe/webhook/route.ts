@@ -43,7 +43,8 @@ import { enqueueQuoteCalls } from '@/lib/queue/enqueue-calls';
 import { seedBusinessesForRequest } from '@/lib/ingest/seed-on-demand';
 import { createLogger } from '@/lib/logger';
 import { verifyStripeWebhook } from '@/lib/security/stripe-auth';
-import { captureException } from '@/lib/observability/sentry';
+import { captureException, captureMessage } from '@/lib/observability/sentry';
+import { sendEmail } from '@/lib/email/resend';
 
 const log = createLogger('stripe/webhook');
 
@@ -75,6 +76,22 @@ export async function POST(
         const note = await handleCheckoutCompleted(
           event,
           event.data.object as Stripe.Checkout.Session
+        );
+        return NextResponse.json({ received: true, eventId: event.id, note });
+      }
+
+      // Chargeback alert. Customer disputed the $9.99 with their bank. We
+      // can't auto-respond programmatically (Stripe requires manual evidence
+      // submission via dashboard), but we MUST surface this immediately:
+      //   • Sentry warning so it lands on the on-call dashboard
+      //   • Email to ops inbox so the operator sees it without checking Stripe
+      //   • Best-effort: tag the related quote_request in the log so the
+      //     operator has all the context for reviewing the dispute
+      // No DB write — disputes need human judgment, not auto-action.
+      case 'charge.dispute.created': {
+        const note = await handleDisputeCreated(
+          event,
+          event.data.object as Stripe.Dispute
         );
         return NextResponse.json({ received: true, eventId: event.id, note });
       }
@@ -375,4 +392,155 @@ async function handleCheckoutCompleted(
   }
 
   return 'Processed';
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// charge.dispute.created handler
+// ─────────────────────────────────────────────────────────────────────
+//
+// Customer disputed a charge with their bank (chargeback). Stripe gives
+// us ~7-21 days to submit evidence via their dashboard. There's no
+// "auto-respond" — every dispute needs human judgment about whether to
+// accept the loss or fight with documentation.
+//
+// What we do here:
+//   1. captureMessage to Sentry (warning level) — lands on the on-call
+//      dashboard so the operator sees the count rising even if email
+//      delivery is degraded.
+//   2. Email the ops inbox (EVENQUOTE_SUPPORT_EMAIL) with the dispute
+//      amount + reason + Stripe dashboard link, so the operator doesn't
+//      have to be watching Stripe to find out.
+//   3. Best-effort: try to find the related quote_request id via the
+//      payments table (charge_id → payment row → quote_request_id) and
+//      include it in the alert. If the lookup fails we still email,
+//      just without the request context.
+//
+// What we DON'T do:
+//   • No DB writes. Disputes are a separate concern from quote_request
+//     status; we don't want to mark a request as "refunded" when the
+//     dispute could still be won.
+//   • No 5xx — we always return ack so Stripe doesn't retry. Dispute
+//     events are informational; missing one would just mean the operator
+//     finds out via Stripe's email instead.
+async function handleDisputeCreated(
+  event: Stripe.Event,
+  dispute: Stripe.Dispute
+): Promise<string> {
+  // Stripe gives us amount in the smallest currency unit (cents for USD).
+  const amountUsd = (dispute.amount / 100).toFixed(2);
+  const reason = dispute.reason ?? 'unspecified';
+  const status = dispute.status;
+  const chargeId =
+    typeof dispute.charge === 'string'
+      ? dispute.charge
+      : (dispute.charge?.id ?? null);
+
+  // Best-effort: link the dispute back to a quote_request so the operator
+  // knows which customer/request to investigate. If the join fails, we
+  // still alert — just with less context.
+  let requestId: string | null = null;
+  if (chargeId) {
+    try {
+      const admin = createAdminClient();
+      const { data: pay } = await admin
+        .from('payments')
+        .select('quote_request_id')
+        .eq('stripe_charge_id', chargeId)
+        .maybeSingle();
+      requestId = pay?.quote_request_id ?? null;
+    } catch (err) {
+      log.warn('dispute: payment lookup failed (continuing with alert)', {
+        chargeId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  log.warn('charge dispute created', {
+    eventId: event.id,
+    disputeId: dispute.id,
+    amountUsd,
+    reason,
+    status,
+    chargeId,
+    requestId,
+  });
+
+  // Sentry warning so disputes show up in alert rollups even when email
+  // isn't configured (e.g. a staging env without RESEND_API_KEY).
+  captureMessage(
+    `Stripe dispute created: $${amountUsd} (reason=${reason}, dispute=${dispute.id})`,
+    'warning',
+    {
+      tags: {
+        route: 'stripe/webhook',
+        eventType: 'charge.dispute.created',
+        reason,
+        status,
+      },
+      extra: { disputeId: dispute.id, chargeId, requestId, eventId: event.id },
+    }
+  );
+
+  // Email the ops inbox. Best-effort — email failure does NOT 500 the
+  // webhook (we already captured to Sentry, and Stripe will email the
+  // account email anyway as a backup channel).
+  const supportEmail = process.env.EVENQUOTE_SUPPORT_EMAIL;
+  if (!supportEmail) {
+    log.warn('dispute alert: EVENQUOTE_SUPPORT_EMAIL not set — skipped email', {
+      disputeId: dispute.id,
+    });
+    return `Dispute logged (no email — set EVENQUOTE_SUPPORT_EMAIL)`;
+  }
+
+  const dashboardLink = `https://dashboard.stripe.com/disputes/${dispute.id}`;
+  const html = `
+    <h2>Stripe dispute created — $${amountUsd}</h2>
+    <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+    <p><strong>Status:</strong> ${escapeHtml(status)}</p>
+    <p><strong>Dispute ID:</strong> <code>${escapeHtml(dispute.id)}</code></p>
+    ${chargeId ? `<p><strong>Charge ID:</strong> <code>${escapeHtml(chargeId)}</code></p>` : ''}
+    ${requestId ? `<p><strong>Quote request:</strong> <code>${escapeHtml(requestId)}</code></p>` : '<p><em>Could not link to a quote_request — check payments table manually.</em></p>'}
+    <p><a href="${dashboardLink}">Review in Stripe →</a></p>
+    <hr/>
+    <p style="color:#666;font-size:12px;">You have ~7-21 days to submit evidence. After that, the dispute auto-resolves in the customer's favor.</p>
+  `.trim();
+
+  const sendResult = await sendEmail({
+    to: supportEmail,
+    subject: `🚨 Stripe dispute: $${amountUsd} (${reason})`,
+    html,
+    text:
+      `Stripe dispute created\n\n` +
+      `Amount: $${amountUsd}\n` +
+      `Reason: ${reason}\n` +
+      `Status: ${status}\n` +
+      `Dispute ID: ${dispute.id}\n` +
+      (chargeId ? `Charge ID: ${chargeId}\n` : '') +
+      (requestId ? `Quote request: ${requestId}\n` : 'Could not link to quote_request\n') +
+      `\nReview: ${dashboardLink}\n`,
+    tag: 'stripe-dispute',
+  });
+
+  if (!sendResult.ok) {
+    log.error('dispute alert email failed', {
+      disputeId: dispute.id,
+      error: sendResult.error,
+    });
+    // Don't 500 — Sentry already has it.
+  }
+
+  return `Dispute alert sent to ${supportEmail} (dispute=${dispute.id}, amount=$${amountUsd})`;
+}
+
+// Tiny HTML escaper — used in the dispute alert template. We don't
+// pull in a full library because the dispute payload is Stripe-controlled
+// and contains a small fixed set of fields.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
