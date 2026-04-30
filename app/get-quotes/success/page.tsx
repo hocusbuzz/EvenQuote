@@ -47,6 +47,7 @@ import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
 import { maskEmail } from '@/lib/text/pii';
+import { resolveTimezoneFromState } from '@/lib/scheduling/business-hours';
 
 // Post-payment confirmation is user-specific and keyed on a session_id
 // or request UUID — not a page we want in search.
@@ -175,12 +176,8 @@ function formatScheduledDispatch(
   if (Number.isNaN(when.getTime())) return null;
   if (when.getTime() <= now.getTime()) return null;
 
-  // Resolve service-area timezone. Lazy import to keep success-page
-  // bundle small (the timezone map is ~3KB of state-name lookups).
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { resolveTimezoneFromState } = require('@/lib/scheduling/business-hours') as {
-    resolveTimezoneFromState: (s: string) => string;
-  };
+  // Resolve service-area timezone. Imported at top of file so the
+  // build doesn't bark on the no-var-requires lint rule.
   const tz = resolveTimezoneFromState(serviceState);
 
   // Compute calendar-day delta in the SERVICE timezone so we can pick
