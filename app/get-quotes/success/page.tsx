@@ -87,6 +87,10 @@ type ResolvedState =
       userIdOnRequest: string | null;
       categorySlug: string;
       categoryName: string;
+      // #117: when non-null AND in the future, dispatch was deferred to
+      // local business hours and we should tell the customer when calls
+      // will actually start (not "shortly", which would be a lie at 3am).
+      scheduledDispatchAt: string | null;
     };
 
 async function resolveState(sp: Props['searchParams']): Promise<ResolvedState> {
@@ -119,7 +123,7 @@ async function resolveState(sp: Props['searchParams']): Promise<ResolvedState> {
     .from('quote_requests')
     .select(
       `
-      id, user_id, status, city, state, intake_data,
+      id, user_id, status, city, state, intake_data, scheduled_dispatch_at,
       service_categories ( name, slug )
     `
     )
@@ -148,7 +152,48 @@ async function resolveState(sp: Props['searchParams']): Promise<ResolvedState> {
     userIdOnRequest: request.user_id,
     categorySlug: category?.slug ?? 'moving',
     categoryName: category?.name ?? 'Moving',
+    scheduledDispatchAt:
+      (request as { scheduled_dispatch_at?: string | null }).scheduled_dispatch_at ?? null,
   };
+}
+
+/**
+ * Format a deferred-dispatch timestamp for the customer-facing copy.
+ * Renders in the SERVICE AREA's local timezone (not the user's browser
+ * tz) so "9am Friday" reads as the cleaner's morning, not the customer's.
+ *
+ * Returns null if the timestamp is missing or already in the past
+ * (cron should have already dispatched by then).
+ */
+function formatScheduledDispatch(
+  scheduledIso: string | null,
+  serviceState: string,
+  now: Date = new Date()
+): string | null {
+  if (!scheduledIso) return null;
+  const when = new Date(scheduledIso);
+  if (Number.isNaN(when.getTime())) return null;
+  if (when.getTime() <= now.getTime()) return null;
+
+  // Resolve service-area timezone. Lazy import to keep success-page
+  // bundle small (the timezone map is ~3KB of state-name lookups).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { resolveTimezoneFromState } = require('@/lib/scheduling/business-hours') as {
+    resolveTimezoneFromState: (s: string) => string;
+  };
+  const tz = resolveTimezoneFromState(serviceState);
+
+  // Compute calendar-day delta in the SERVICE timezone so we can pick
+  // "9 AM Friday" vs "tomorrow at 9 AM" vs "in 30 minutes" naturally.
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  });
+  return fmt.format(when);
 }
 
 export default async function SuccessPage({ searchParams }: Props) {
@@ -249,6 +294,18 @@ export default async function SuccessPage({ searchParams }: Props) {
 
   const noun = CATEGORY_NOUN[state.categorySlug] ?? 'local pros';
 
+  // #117: if dispatch was deferred to local business hours, render
+  // "starting at 9:00 AM PDT Friday" instead of "shortly". Returns null
+  // when the request was dispatched immediately or scheduled time has
+  // already passed (cron should have picked it up by then).
+  const scheduledDispatchCopy = formatScheduledDispatch(
+    state.scheduledDispatchAt,
+    state.state
+  );
+  const scheduledDispatchPretty = scheduledDispatchCopy
+    ? `starting at ${scheduledDispatchCopy}`
+    : null;
+
   return (
     <>
       <SiteNavbar />
@@ -286,7 +343,18 @@ export default async function SuccessPage({ searchParams }: Props) {
                 <span className="font-semibold text-foreground">
                   {titleCaseCity(state.city)}, {state.state}
                 </span>{' '}
-                shortly. You&rsquo;ll get an email with the side-by-side quote report within 24 hours.
+                {scheduledDispatchPretty ? (
+                  <>
+                    {scheduledDispatchPretty}. We never call businesses outside
+                    their local hours — your quotes will be ready within a
+                    few hours of dispatch.
+                  </>
+                ) : (
+                  <>
+                    shortly. You&rsquo;ll get an email with the side-by-side
+                    quote report within 24 hours.
+                  </>
+                )}
               </p>
 
               {/* Dotted "route" visual — SVG, no JS */}
