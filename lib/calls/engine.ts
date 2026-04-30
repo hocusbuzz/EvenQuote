@@ -11,6 +11,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getCallBatchSize } from '@/lib/env';
 import { selectBusinessesForRequest } from './select-businesses';
 import { startOutboundCall } from './vapi';
+import { buildSafeVariableValues } from './build-safe-variable-values';
 import { captureException } from '@/lib/observability/sentry';
 
 // How many businesses we try to call per quote request. Configurable
@@ -240,7 +241,7 @@ export async function runCallBatchWith(
   let failed = 0;
   let simulatedCount = 0;
 
-  const variableValues = buildVariableValues(claimed);
+  const variableValues = buildSafeVariableValues(claimed);
 
   for (let i = 0; i < insertedCalls.length; i += 1) {
     const callRow = insertedCalls[i];
@@ -391,53 +392,15 @@ export async function runCallBatchWith(
   };
 }
 
-/**
- * Flatten quote_request + intake_data into the `{{variables}}` the Vapi
- * assistant prompt expects. Generic across categories — whatever keys
- * the intake form stored, we pass them through. Assistant prompts for
- * each category reference their own keys via call_script_template.
- *
- * Privacy guardrails (enforced here regardless of category):
- *   - Strip contact_phone, contact_email. The AI is the caller — the
- *     business gets contact_name and city only. Phase 8 adds an
- *     opt-in callback handoff.
- *   - Strip full street addresses. City/state/zip is enough to quote.
- */
-const BUSINESS_REACHABLE_KEYS = new Set<string>([
-  'contact_phone',
-  'contact_email',
-  'origin_address',
-  'destination_address',
-  'address', // single-address verticals (cleaning, handyman, lawn-care)
-]);
-
-function buildVariableValues(qr: QuoteRequestRow): Record<string, string | number | null | undefined> {
-  const d = (qr.intake_data ?? {}) as Record<string, unknown>;
-  const out: Record<string, string | number | null | undefined> = {};
-
-  for (const [k, v] of Object.entries(d)) {
-    if (BUSINESS_REACHABLE_KEYS.has(k)) continue;
-    if (v === null || v === undefined) {
-      out[k] = null;
-    } else if (Array.isArray(v)) {
-      out[k] = v.join(', ');
-    } else if (typeof v === 'number') {
-      out[k] = v;
-    } else {
-      out[k] = String(v);
-    }
-  }
-
-  // Also pass the top-level request location — these live on quote_requests
-  // directly (not in intake_data), so the `for-in` above doesn't pick them
-  // up. Prompt references {{city}}/{{state}}/{{zip_code}} as the service
-  // area for non-moving verticals (cleaning/handyman/lawn-care).
-  out.city = qr.city ?? null;
-  out.state = qr.state ?? null;
-  out.zip_code = qr.zip_code ?? null;
-
-  return out;
-}
+// `buildVariableValues` was removed (R49 / task #116). It used a
+// denylist (BUSINESS_REACHABLE_KEYS) which left contact_name and any
+// future PII field exposed to the AI assistant by default.
+//
+// Use `buildSafeVariableValues` from `./build-safe-variable-values.ts`
+// — same call signature, but with an ALLOWLIST + free-text PII scrub.
+// Defense-in-depth: a new intake field has to be opted in to flow to
+// the AI assistant. See that file's module-level comment for the full
+// privacy contract.
 
 
 // ══════════════════════════════════════════════════════════════════════
@@ -586,7 +549,7 @@ export async function runAdditionalBatch(
     .eq('id', quoteRequestId);
 
   // 6. Dispatch. Reuse the same pattern as runCallBatch.
-  const variableValues = buildVariableValues(request as QuoteRequestRow);
+  const variableValues = buildSafeVariableValues(request as QuoteRequestRow);
   let dispatched = 0;
   let failed = 0;
   let simulatedCount = 0;

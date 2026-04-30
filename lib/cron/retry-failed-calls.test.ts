@@ -43,7 +43,14 @@ type CandidateRow = {
   last_retry_at: string | null;
   created_at: string;
   businesses: { name: string; phone: string } | null;
-  quote_requests: { intake_data: Record<string, unknown> | null } | null;
+  quote_requests:
+    | {
+        intake_data: Record<string, unknown> | null;
+        city: string | null;
+        state: string | null;
+        zip_code: string | null;
+      }
+    | null;
 };
 
 type StubState = {
@@ -198,13 +205,18 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     businesses: { name: 'Acme Movers', phone: '+14155551234' },
     quote_requests: {
       intake_data: {
+        // PII — must NOT leak through.
         contact_name: 'Alex',
         contact_email: 'alex@example.com',
         contact_phone: '+14155559999',
-        move_type: 'studio',
-        rooms: 2,
-        tags: ['stairs', 'piano'],
+        address: '123 Main St',
+        // Allowlisted real intake fields.
+        home_size: '2 bedroom',
+        special_items: ['stairs', 'piano'],
       },
+      city: 'San Francisco',
+      state: 'CA',
+      zip_code: '94110',
     },
     ...overrides,
   };
@@ -333,15 +345,21 @@ describe('retryFailedCalls', () => {
     expect(args.metadata.business_id).toBe('biz_1');
     expect(args.metadata.retry_attempt).toBe('1');
 
-    // variableValues strip business-reachable keys (contact_email, contact_phone) and
-    // flatten arrays/primitives. Source intake has both PII keys plus tags as array.
-    expect(args.variableValues.contact_name).toBe('Alex');
-    expect(args.variableValues.move_type).toBe('studio');
-    expect(args.variableValues.rooms).toBe(2);
-    expect(args.variableValues.tags).toBe('stairs, piano');
-    // BUSINESS_REACHABLE_KEYS must NOT leak through.
+    // R49 / task #116 — buildSafeVariableValues uses an allowlist.
+    // PII keys (contact_name, contact_phone, contact_email, address)
+    // MUST NOT leak through; only allowlisted intake fields + city/
+    // state/zip from the qr row reach the assistant.
+    expect(args.variableValues.contact_name).toBeUndefined();
     expect(args.variableValues.contact_email).toBeUndefined();
     expect(args.variableValues.contact_phone).toBeUndefined();
+    expect(args.variableValues.address).toBeUndefined();
+    // Allowlisted intake fields pass through; arrays are joined.
+    expect(args.variableValues.home_size).toBe('2 bedroom');
+    expect(args.variableValues.special_items).toBe('stairs, piano');
+    // Top-level qr fields propagate so the assistant has a service area.
+    expect(args.variableValues.city).toBe('San Francisco');
+    expect(args.variableValues.state).toBe('CA');
+    expect(args.variableValues.zip_code).toBe('94110');
 
     // R47.4 — TWO row updates:
     //   1. Pre-mark BEFORE dialing: retry_count + last_retry_at.

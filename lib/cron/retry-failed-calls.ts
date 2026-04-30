@@ -25,6 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { startOutboundCall } from '@/lib/calls/vapi';
+import { buildSafeVariableValues } from '@/lib/calls/build-safe-variable-values';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
 
@@ -111,7 +112,7 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
       last_retry_at,
       created_at,
       businesses:business_id ( name, phone ),
-      quote_requests:quote_request_id ( intake_data )
+      quote_requests:quote_request_id ( intake_data, city, state, zip_code )
     `)
     .eq('status', 'failed')
     .is('started_at', null)
@@ -217,7 +218,7 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
     const dispatch = await startOutboundCall({
       toPhone: biz.phone,
       businessName: biz.name,
-      variableValues: buildVariableValues(qr.intake_data ?? {}),
+      variableValues: buildSafeVariableValues(qr),
       metadata: {
         quote_request_id: row.quote_request_id,
         call_id: row.id,
@@ -314,36 +315,9 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
   };
 }
 
-// The variable-building logic mirrors lib/calls/engine.ts. Kept here as
-// a small duplicate because importing from engine would pull in the full
-// batch-claim machinery. Any change to BUSINESS_REACHABLE_KEYS should be
-// mirrored there (grep for BUSINESS_REACHABLE_KEYS).
-const BUSINESS_REACHABLE_KEYS = new Set<string>([
-  'contact_phone',
-  'contact_email',
-  'origin_address',
-  'destination_address',
-  'address',
-]);
-
-function buildVariableValues(
-  intake: Record<string, unknown>
-): Record<string, string | number | null | undefined> {
-  const out: Record<string, string | number | null | undefined> = {};
-  for (const [k, v] of Object.entries(intake)) {
-    if (BUSINESS_REACHABLE_KEYS.has(k)) continue;
-    if (v === null || v === undefined) {
-      out[k] = null;
-    } else if (Array.isArray(v)) {
-      out[k] = v.join(', ');
-    } else if (typeof v === 'number') {
-      out[k] = v;
-    } else {
-      out[k] = String(v);
-    }
-  }
-  return out;
-}
+// The local `buildVariableValues` was removed in R49 / task #116.
+// Use `buildSafeVariableValues` from `@/lib/calls/build-safe-variable-values`
+// — allowlist-based, with PII scrubbing on free-text fields.
 
 function flattenOne<T>(v: T | T[] | null | undefined): T | null {
   if (!v) return null;
