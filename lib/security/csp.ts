@@ -53,13 +53,33 @@ export function buildCsp(opts: {
     }
   })();
 
+  // GA4 hosts. The script-src additions are belt-and-suspenders —
+  // 'strict-dynamic' should already let the nonced GA4 loader pull
+  // gtag.js, but older browsers without strict-dynamic support fall
+  // back to the explicit allowlist.
+  //
+  // connect-src additions cover the runtime beacons:
+  //   • google-analytics.com         — classic /collect endpoint
+  //   • analytics.google.com         — newer /g/collect endpoint
+  //   • *.analytics.google.com       — region-specific shards
+  //   • googletagmanager.com         — config + remote-config requests
+  //
+  // Only added when GA4 is configured so non-prod environments don't
+  // advertise an analytics surface they don't actually use.
+  const ga4ScriptHosts = process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID
+    ? ' https://*.googletagmanager.com'
+    : '';
+  const ga4ConnectHosts = process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID
+    ? ' https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com'
+    : '';
+
   const directives = [
     `default-src 'self'`,
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${ga4ScriptHosts}`,
     `style-src 'self' 'unsafe-inline'`,
     `img-src 'self' blob: data: https:`,
     `font-src 'self' data:`,
-    `connect-src 'self' ${supabaseOrigin} https://*.supabase.co https://api.stripe.com`,
+    `connect-src 'self' ${supabaseOrigin} https://*.supabase.co https://api.stripe.com${ga4ConnectHosts}`,
     `frame-src 'self' https://checkout.stripe.com https://js.stripe.com`,
     `frame-ancestors 'none'`,
     `form-action 'self' https://checkout.stripe.com`,

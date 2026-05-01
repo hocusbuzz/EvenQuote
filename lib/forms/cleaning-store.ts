@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { CleaningIntakeDraft, StepId } from '@/lib/forms/cleaning-intake';
+import { trackClient } from '@/lib/analytics/track';
 
 const STORE_VERSION = 1;
 
@@ -27,6 +28,10 @@ type CleaningIntakeStore = {
   currentStep: StepId;
   setStep: (step: StepId) => void;
 
+  // See lib/forms/intake-store.ts for the rationale on the `started`
+  // one-shot flag — same pattern, vertical-tagged event.
+  started: boolean;
+
   reset: () => void;
 };
 
@@ -35,14 +40,33 @@ export const useCleaningStore = create<CleaningIntakeStore>()(
     (set) => ({
       draft: {},
       setField: (key, value) =>
-        set((state) => ({ draft: { ...state.draft, [key]: value } })),
+        set((state) => {
+          const next = {
+            draft: { ...state.draft, [key]: value },
+          } as Partial<CleaningIntakeStore>;
+          if (!state.started) {
+            trackClient('quote_request_started', { vertical: 'cleaning' });
+            next.started = true;
+          }
+          return next;
+        }),
       setFields: (updates) =>
-        set((state) => ({ draft: { ...state.draft, ...updates } })),
+        set((state) => {
+          const next = {
+            draft: { ...state.draft, ...updates },
+          } as Partial<CleaningIntakeStore>;
+          if (!state.started) {
+            trackClient('quote_request_started', { vertical: 'cleaning' });
+            next.started = true;
+          }
+          return next;
+        }),
 
       currentStep: 'location',
       setStep: (step) => set({ currentStep: step }),
 
-      reset: () => set({ draft: {}, currentStep: 'location' }),
+      started: false,
+      reset: () => set({ draft: {}, currentStep: 'location', started: false }),
     }),
     {
       name: 'evenquote:intake:cleaning',
@@ -51,6 +75,7 @@ export const useCleaningStore = create<CleaningIntakeStore>()(
       partialize: (state) => ({
         draft: state.draft,
         currentStep: state.currentStep,
+        started: state.started,
       }),
     }
   )

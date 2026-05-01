@@ -86,6 +86,31 @@ const ServerEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url().optional(),
   NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED: BooleanString.optional(),
 
+  // ─── Analytics — GA4 (optional) ─────────────────────────────────
+  // Both vars are optional at schema level so:
+  //   • local dev (no analytics needed) and
+  //   • staging deploys (where we don't want to pollute prod GA4
+  //     stream) can boot cleanly.
+  // The analytics module is a graceful no-op when either is missing —
+  // see lib/analytics/ga4.ts for the runtime guards. Pre-paid-traffic
+  // (#125 / day-8 marketing sprint) prod must have BOTH set.
+  //
+  // NEXT_PUBLIC_GA4_MEASUREMENT_ID: client-side gtag init + event fire.
+  //   Format: 'G-XXXXXXXXXX' (10 alphanumeric after the dash).
+  //   NEXT_PUBLIC_ prefix bakes it into the client bundle at build time
+  //   — required because the gtag script needs it inline in the layout.
+  //
+  // GA4_API_SECRET: server-side Measurement Protocol secret. Used for
+  //   the quote_request_paid (Stripe webhook) and quote_delivered
+  //   (Resend cron) events that have no client to gtag from. Generated
+  //   in GA4 Admin → Data Streams → Measurement Protocol API secrets.
+  //   NEVER exposed to the client; no NEXT_PUBLIC_ prefix.
+  NEXT_PUBLIC_GA4_MEASUREMENT_ID: z
+    .string()
+    .regex(/^G-[A-Z0-9]+$/, 'GA4 measurement ID looks like G-XXXXXXXXXX')
+    .optional(),
+  GA4_API_SECRET: z.string().min(8, 'GA4 API secret looks short').optional(),
+
   // ─── Maintenance mode ──────────────────────────────────────────
   MAINTENANCE_MODE: BooleanString.optional(),
   MAINTENANCE_PREVIEW_TOKEN: z.string().optional(),

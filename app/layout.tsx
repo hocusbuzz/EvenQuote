@@ -19,6 +19,7 @@ import { Fraunces } from 'next/font/google';
 import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
 import { headers } from 'next/headers';
+import { GA4Script } from '@/lib/analytics/ga4-script';
 import './globals.css';
 
 const fraunces = Fraunces({
@@ -189,6 +190,12 @@ export default function RootLayout({
         <div id="main-content" tabIndex={-1} className="outline-none">
           {children}
         </div>
+        {/* GA4 — afterInteractive load (does NOT block LCP). Renders
+            null when NEXT_PUBLIC_GA4_MEASUREMENT_ID is unset, so non-
+            prod environments don't pollute the production stream.
+            Threaded with the same per-request CSP nonce as the JSON-
+            LD scripts above. */}
+        <GA4Script nonce={nonce} />
       </body>
     </html>
   );

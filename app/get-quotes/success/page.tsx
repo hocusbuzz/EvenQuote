@@ -46,8 +46,10 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
+import { TrackPaidOnMount } from '@/components/get-quotes/track-paid-on-mount';
 import { maskEmail } from '@/lib/text/pii';
 import { resolveTimezoneFromState } from '@/lib/scheduling/business-hours';
+import type { AnalyticsEventParams } from '@/lib/analytics/events';
 
 // Post-payment confirmation is user-specific and keyed on a session_id
 // or request UUID — not a page we want in search.
@@ -303,9 +305,26 @@ export default async function SuccessPage({ searchParams }: Props) {
     ? `starting at ${scheduledDispatchCopy}`
     : null;
 
+  // Narrow the categorySlug (free-form text from service_categories) to
+  // the analytics vertical union. Unknown slugs (a future vertical the
+  // analytics module hasn't been taught) just drop the vertical param —
+  // the event still fires with a request_id + value, which is enough
+  // for ad-platform conversion attribution.
+  const KNOWN_VERTICALS: ReadonlySet<NonNullable<AnalyticsEventParams['vertical']>> =
+    new Set(['moving', 'cleaning', 'handyman', 'lawn-care', 'junk-removal']);
+  const analyticsVertical = KNOWN_VERTICALS.has(
+    state.categorySlug as NonNullable<AnalyticsEventParams['vertical']>
+  )
+    ? (state.categorySlug as NonNullable<AnalyticsEventParams['vertical']>)
+    : undefined;
+
   return (
     <>
       <SiteNavbar />
+      {/* Fires the `quote_request_paid` analytics conversion event,
+          guarded against double-fire on re-render via sessionStorage
+          keyed on the request id. See component for the full rationale. */}
+      <TrackPaidOnMount requestId={state.requestId} vertical={analyticsVertical} />
       <main className="container max-w-2xl py-12 sm:py-16">
         {/* Top strip: category chip + "Paid" pill */}
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">

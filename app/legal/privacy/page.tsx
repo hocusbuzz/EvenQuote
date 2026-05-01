@@ -97,8 +97,18 @@ export default function PrivacyPage() {
         </li>
         <li>
           <strong>Cookies:</strong> a small set of first-party cookies for
-          session authentication and CSRF protection. We do <em>not</em> run
-          analytics pixels, ad networks, or third-party trackers.
+          session authentication and CSRF protection.
+        </li>
+        <li>
+          <strong>Analytics:</strong> we use Google Analytics 4 to count
+          how many people visit, start a quote request, complete payment,
+          and receive their report. GA4 is configured with{' '}
+          <em>anonymize_ip</em> on (your IP is truncated before storage)
+          and <em>non_personalized_ads</em> on (your visit is not added
+          to Google&rsquo;s ads-targeting graph). The events GA4 sees
+          include the page URL (which may contain a UTM tag from an ad
+          you clicked) and an opaque request UUID &mdash; never your
+          name, phone, email, or address.
         </li>
       </ul>
 
@@ -242,12 +252,21 @@ export default function PrivacyPage() {
           <strong>Google Places</strong> &mdash; address strings you typed;
           for address autocomplete and business directory data.
         </li>
+        <li>
+          <strong>Google Analytics 4</strong> &mdash; visit, start, paid,
+          and delivered counts, with anonymized IP and ad-personalization
+          turned off. Never your name, phone, email, or address. See the
+          &ldquo;Cookies&rdquo; bullet above for details.
+        </li>
       </ul>
       <p>We do <strong>not</strong> share your data with:</p>
       <ul>
         <li>Advertising networks</li>
         <li>Data brokers</li>
-        <li>Marketing or analytics companies</li>
+        <li>
+          Marketing companies, or analytics companies beyond GA4 as
+          described above
+        </li>
         <li>Other quote-shopping or referral services</li>
       </ul>
       <p>

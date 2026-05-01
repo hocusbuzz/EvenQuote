@@ -45,6 +45,8 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { sendEmail } from '@/lib/email/resend';
+import { trackServer } from '@/lib/analytics/track-server';
+import type { AnalyticsEventParams } from '@/lib/analytics/events';
 import {
   renderQuoteReport,
   type NoQuoteCause,
@@ -428,10 +430,46 @@ async function processOne(
     // Email DID go out — return sent so the caller's metrics reflect
     // reality. The status mismatch is an admin-visible follow-up,
     // not a customer-facing failure.
+    void fireDeliveredAnalytics(request);
     return { status: 'sent', email_id: send.id };
   }
 
+  void fireDeliveredAnalytics(request);
   return { status: 'sent', email_id: send.id };
+}
+
+/**
+ * Fire `quote_delivered` to GA4 (and any future provider) via the
+ * Measurement Protocol. Fire-and-forget — analytics MUST NOT delay
+ * the cron return path or break the send pipeline. trackServer
+ * already swallows per-provider failures internally; we wrap with a
+ * `.catch` belt-and-suspenders so an unexpected throw doesn't bubble.
+ *
+ * client_id = quote_request.id so the event ties back to the same
+ * user-journey as the upstream `quote_request_paid` (which fires
+ * with the same request_id from the success page). Imperfect — the
+ * paid event uses the user's real GA4 cookie client_id, while this
+ * event uses the request UUID — but events with the same request_id
+ * param are still joinable in GA4 explorations.
+ */
+function fireDeliveredAnalytics(request: ProcessingRequest): Promise<void> {
+  // Narrow category.slug to the analytics vertical union; unknown
+  // slugs drop the param rather than poison the event.
+  const KNOWN_VERTICALS: ReadonlySet<NonNullable<AnalyticsEventParams['vertical']>> =
+    new Set(['moving', 'cleaning', 'handyman', 'lawn-care', 'junk-removal']);
+  const slug = request.category?.slug;
+  const vertical =
+    slug && KNOWN_VERTICALS.has(slug as NonNullable<AnalyticsEventParams['vertical']>)
+      ? (slug as NonNullable<AnalyticsEventParams['vertical']>)
+      : undefined;
+
+  return trackServer({
+    name: 'quote_delivered',
+    clientId: request.id,
+    params: { vertical, request_id: request.id },
+  })
+    .then(() => undefined)
+    .catch(() => undefined);
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
