@@ -89,6 +89,16 @@ const ALLOWED_INTAKE_KEYS: ReadonlySet<string> = new Set([
   // 'frequency' is already in this allowlist (cleaning shares it)
   'start_date',
 
+  // ── Junk-removal vertical ──
+  // Same shape as lawn-care — no free-text job description; the
+  // load-shape (volume + heavy items + access) is fully structured.
+  // additional_notes goes through SCRUBBED below.
+  'volume_bucket',
+  'heavy_items',  // multiselect; flattened to comma-list
+  'pickup_location',
+  'same_day_needed',
+  'preferred_date',
+
   // ── Shared ──
   // additional_notes + job_description handled separately (scrubbed) —
   // NOT here, so the loop below skips them and we add the scrubbed

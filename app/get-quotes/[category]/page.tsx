@@ -20,6 +20,7 @@ import { IntakeFormShell } from '@/components/get-quotes/form-shell';
 import { CleaningFormShell } from '@/components/get-quotes/cleaning-form-shell';
 import { HandymanFormShell } from '@/components/get-quotes/handyman-form-shell';
 import { LawnCareFormShell } from '@/components/get-quotes/lawn-care-form-shell';
+import { JunkRemovalFormShell } from '@/components/get-quotes/junk-removal-form-shell';
 import { WaitlistCapture } from '@/components/get-quotes/waitlist-capture';
 import { UtmCapture } from '@/components/get-quotes/utm-capture';
 
@@ -36,6 +37,7 @@ const LIVE_FORMS: Record<string, React.ComponentType> = {
   cleaning: CleaningFormShell,
   handyman: HandymanFormShell,
   'lawn-care': LawnCareFormShell,
+  'junk-removal': JunkRemovalFormShell,
 };
 
 type CategoryRow = {

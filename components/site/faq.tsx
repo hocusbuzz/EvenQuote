@@ -37,7 +37,7 @@ const faqs = [
   },
   {
     q: 'What areas do you cover?',
-    a: 'US only for now. Moving, house cleaning, handyman, and lawn care quotes are all live. We start with a vertical once we have enough quality local businesses seeded to make the report feel comprehensive — junk removal and tree services are next.',
+    a: 'US only for now. Moving, house cleaning, handyman, lawn care, and junk removal quotes are all live. We start with a vertical once we have enough quality local businesses seeded to make the report feel comprehensive — tree services and pest control are next.',
   },
   {
     q: 'Will businesses start spamming my phone?',

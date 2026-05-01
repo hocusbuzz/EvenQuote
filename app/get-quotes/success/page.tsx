@@ -74,6 +74,7 @@ const CATEGORY_NOUN: Record<string, string> = {
   handyman: 'handymen',
   'lawn-care': 'lawn crews',
   lawn: 'lawn crews',
+  'junk-removal': 'junk removal crews',
 };
 
 type ResolvedState =
