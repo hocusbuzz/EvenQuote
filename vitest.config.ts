@@ -24,7 +24,13 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['**/*.{test,spec}.{ts,tsx}'],
-    exclude: ['node_modules/**', '.next/**'],
+    // .claude/** keeps vitest from descending into Claude Code's worktree
+    // dir (`.claude/worktrees/<branch>/...`). Each worktree is a separate
+    // checkout — usually on a different commit, often without node_modules
+    // — so picking up its test files double-counts the suite and emits
+    // spurious "import failed" failures. .gitignore already excludes the
+    // dir from version control; this matches.
+    exclude: ['node_modules/**', '.next/**', '.claude/**'],
   },
   resolve: {
     alias: {

@@ -18,12 +18,16 @@ import { STEPS, type StepId } from '@/lib/forms/handyman-intake';
 import { STEP_COMPONENTS } from './handyman-steps';
 import { IntakeProgress } from './progress';
 import { submitHandymanIntake } from '@/lib/actions/handyman-intake';
+import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
 
 export function HandymanFormShell() {
   const hydrated = useIsHandymanHydrated();
+  // See form-shell.tsx for the rationale on the second hydration gate.
+  const utmsHydrated = useIsUtmsHydrated();
   const currentStep = useHandymanStore((s) => s.currentStep);
   const setStep = useHandymanStore((s) => s.setStep);
   const draft = useHandymanStore((s) => s.draft);
+  const utms = useUtmsStore((s) => s.utms);
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -48,7 +52,8 @@ export function HandymanFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      const result = await submitHandymanIntake(draft);
+      // See form-shell.tsx for rationale on merging UTMs at submit time.
+      const result = await submitHandymanIntake({ ...draft, ...utms });
       if (!result.ok) {
         setSubmitError(result.error);
         if (result.fieldErrors) {
@@ -70,7 +75,7 @@ export function HandymanFormShell() {
     });
   };
 
-  if (!hydrated) {
+  if (!hydrated || !utmsHydrated) {
     return (
       <div className="space-y-8" aria-hidden>
         <div className="h-8 w-64 animate-pulse rounded bg-foreground/10" />

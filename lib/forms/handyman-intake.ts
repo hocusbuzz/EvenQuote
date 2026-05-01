@@ -18,6 +18,7 @@
 //   • Steps: location → job → contact → review.
 
 import { z } from 'zod';
+import { UtmsSchema } from '@/lib/marketing/utms';
 import {
   ZipSchema,
   PhoneSchema,
@@ -137,8 +138,11 @@ export const ContactSchema = z.object({
 
 // ─── Full intake ─────────────────────────────────────────────────
 
+// See moving-intake.ts for the rationale on merging UTMs at the full-
+// schema level rather than a step. Same shape, same persistence path.
 export const HandymanIntakeSchema = LocationSchema.merge(JobSchema)
-  .merge(ContactSchema);
+  .merge(ContactSchema)
+  .merge(UtmsSchema);
 
 export type HandymanIntakeData = z.infer<typeof HandymanIntakeSchema>;
 export type HandymanIntakeDraft = Partial<HandymanIntakeData>;

@@ -134,6 +134,12 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
   // service location, not where the customer is moving from. Both
   // nullable — manual address entries can lack them and the seeder
   // falls back to a city-name geocoded query.
+  // utm_* columns (migration 0015): also present inside intake_data
+  // because UtmsSchema is merged into MovingIntakeSchema; the dedicated
+  // columns make CAC / cohort SQL trivially indexable without jsonb
+  // path operators. Both surfaces stay in sync because they come from
+  // the same parsed payload — see lib/marketing/utms-store.ts for
+  // capture and components/get-quotes/form-shell.tsx for merge-at-submit.
   const { data: inserted, error: insertErr } = await admin
     .from('quote_requests')
     .insert({
@@ -146,6 +152,11 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
       zip_code: data.destination_zip,
       origin_lat: data.destination_lat ?? null,
       origin_lng: data.destination_lng ?? null,
+      utm_source: data.utm_source ?? null,
+      utm_medium: data.utm_medium ?? null,
+      utm_campaign: data.utm_campaign ?? null,
+      utm_content: data.utm_content ?? null,
+      utm_term: data.utm_term ?? null,
     })
     .select('id')
     .single();

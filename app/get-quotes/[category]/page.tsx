@@ -20,6 +20,7 @@ import { IntakeFormShell } from '@/components/get-quotes/form-shell';
 import { CleaningFormShell } from '@/components/get-quotes/cleaning-form-shell';
 import { HandymanFormShell } from '@/components/get-quotes/handyman-form-shell';
 import { WaitlistCapture } from '@/components/get-quotes/waitlist-capture';
+import { UtmCapture } from '@/components/get-quotes/utm-capture';
 
 // Force per-request SSR. Without this, Next.js may statically generate the
 // page at build time. If the build sandbox can't reach Supabase, the
@@ -71,6 +72,7 @@ export default async function CategoryIntakePage({
   return (
     <>
       <SiteNavbar />
+      <UtmCapture />
       <main className="container max-w-2xl py-12 sm:py-16">
         <div className="mb-8">
           <p className="label-eyebrow mb-2">{category.name} quote</p>

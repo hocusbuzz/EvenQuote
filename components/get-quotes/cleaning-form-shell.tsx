@@ -17,12 +17,16 @@ import { STEPS, type StepId } from '@/lib/forms/cleaning-intake';
 import { STEP_COMPONENTS } from './cleaning-steps';
 import { IntakeProgress } from './progress';
 import { submitCleaningIntake } from '@/lib/actions/cleaning-intake';
+import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
 
 export function CleaningFormShell() {
   const hydrated = useIsCleaningHydrated();
+  // See form-shell.tsx for the rationale on the second hydration gate.
+  const utmsHydrated = useIsUtmsHydrated();
   const currentStep = useCleaningStore((s) => s.currentStep);
   const setStep = useCleaningStore((s) => s.setStep);
   const draft = useCleaningStore((s) => s.draft);
+  const utms = useUtmsStore((s) => s.utms);
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -47,7 +51,8 @@ export function CleaningFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      const result = await submitCleaningIntake(draft);
+      // See form-shell.tsx for rationale on merging UTMs at submit time.
+      const result = await submitCleaningIntake({ ...draft, ...utms });
       if (!result.ok) {
         setSubmitError(result.error);
         if (result.fieldErrors) {
@@ -75,7 +80,7 @@ export function CleaningFormShell() {
     });
   };
 
-  if (!hydrated) {
+  if (!hydrated || !utmsHydrated) {
     return (
       <div className="space-y-8" aria-hidden>
         <div className="h-8 w-64 animate-pulse rounded bg-foreground/10" />

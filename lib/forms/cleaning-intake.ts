@@ -11,6 +11,7 @@
 // category — if you edit the seed, update this and vice versa.
 
 import { z } from 'zod';
+import { UtmsSchema } from '@/lib/marketing/utms';
 import {
   ZipSchema,
   PhoneSchema,
@@ -167,9 +168,12 @@ export const ContactSchema = z.object({
 
 // ─── Full intake ─────────────────────────────────────────────────
 
+// See moving-intake.ts for the rationale on merging UTMs at the full-
+// schema level rather than a step. Same shape, same persistence path.
 export const CleaningIntakeSchema = LocationSchema.merge(HomeSchema)
   .merge(ServiceSchema)
-  .merge(ContactSchema);
+  .merge(ContactSchema)
+  .merge(UtmsSchema);
 
 export type CleaningIntakeData = z.infer<typeof CleaningIntakeSchema>;
 export type CleaningIntakeDraft = Partial<CleaningIntakeData>;

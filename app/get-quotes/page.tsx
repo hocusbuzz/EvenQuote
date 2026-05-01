@@ -12,6 +12,7 @@
 import Link from 'next/link';
 import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
+import { UtmCapture } from '@/components/get-quotes/utm-capture';
 import { createAdminClient } from '@/lib/supabase/admin';
 
 export const metadata = {
@@ -52,6 +53,7 @@ export default async function GetQuotesPage() {
   return (
     <>
       <SiteNavbar />
+      <UtmCapture />
       <main className="container max-w-4xl py-12 sm:py-16">
         <div className="mb-10">
           <p className="label-eyebrow mb-2">Pick a service</p>

@@ -94,6 +94,11 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
   //    lat/lng (when the user picked a Google prediction) get persisted
   //    to origin_lat/origin_lng — used by the on-demand business seeder
   //    and the radius selector. Nullable: manual entries lack coords.
+  //
+  //    utm_* columns: see intake.ts (moving) for the full rationale —
+  //    captured by utm-capture.tsx, merged into payload at submit,
+  //    persisted both inside intake_data jsonb and as dedicated
+  //    columns for indexable cohort/CAC analysis.
   const { data: inserted, error: insertErr } = await admin
     .from('quote_requests')
     .insert({
@@ -106,6 +111,11 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
       zip_code: data.zip,
       origin_lat: data.lat ?? null,
       origin_lng: data.lng ?? null,
+      utm_source: data.utm_source ?? null,
+      utm_medium: data.utm_medium ?? null,
+      utm_campaign: data.utm_campaign ?? null,
+      utm_content: data.utm_content ?? null,
+      utm_term: data.utm_term ?? null,
     })
     .select('id')
     .single();

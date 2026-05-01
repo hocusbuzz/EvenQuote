@@ -10,6 +10,7 @@
 // 'moving' category — if you edit the seed, update this and vice versa.
 
 import { z } from 'zod';
+import { UtmsSchema } from '@/lib/marketing/utms';
 
 // ─── Reusable primitives ──────────────────────────────────────────
 
@@ -164,9 +165,16 @@ export const ContactSchema = z.object({
 
 // ─── Full intake ─────────────────────────────────────────────────
 
+// UTMs are merged into the full schema (not into a step) because
+// they're auto-captured from the landing URL by components/get-quotes/
+// utm-capture.tsx, not user-entered. All five fields are .optional().
+// Direct/organic traffic legitimately has no UTMs; pre-launch rows
+// have none either. Persisted into utm_* columns by the intake server
+// action — see migration 0015_quote_requests_utm_columns.sql.
 export const MovingIntakeSchema = OriginSchema.merge(DestinationSchema)
   .merge(DetailsSchema)
-  .merge(ContactSchema);
+  .merge(ContactSchema)
+  .merge(UtmsSchema);
 
 export type MovingIntakeData = z.infer<typeof MovingIntakeSchema>;
 

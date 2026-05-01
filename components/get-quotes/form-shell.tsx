@@ -20,12 +20,19 @@ import { STEPS, type StepId } from '@/lib/forms/moving-intake';
 import { STEP_COMPONENTS } from './steps';
 import { IntakeProgress } from './progress';
 import { submitMovingIntake } from '@/lib/actions/intake';
+import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
 
 export function IntakeFormShell() {
   const hydrated = useIsHydrated();
+  // UTMs hydrate from a separate localStorage key (evenquote:utms),
+  // so we wait for both before considering the shell ready. If we
+  // submitted before UTMs hydrated, we'd lose attribution on the rare
+  // user who lands → fills form faster than the rehydrate roundtrip.
+  const utmsHydrated = useIsUtmsHydrated();
   const currentStep = useIntakeStore((s) => s.currentStep);
   const setStep = useIntakeStore((s) => s.setStep);
   const draft = useIntakeStore((s) => s.draft);
+  const utms = useUtmsStore((s) => s.utms);
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -53,7 +60,11 @@ export function IntakeFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      const result = await submitMovingIntake(draft);
+      // Merge captured UTMs into the payload right at submit time.
+      // The intake server action validates these as optional via the
+      // shared UtmsSchema (merged into MovingIntakeSchema) and persists
+      // them into the utm_* columns added by migration 0015.
+      const result = await submitMovingIntake({ ...draft, ...utms });
       if (!result.ok) {
         setSubmitError(result.error);
         // If server validation caught something, jump to the most
@@ -80,7 +91,7 @@ export function IntakeFormShell() {
   // empty and currentStep is 'origin' regardless of what's in
   // localStorage. If we rendered now, returning users would see the
   // form blank for one frame — bad UX. Show a skeleton instead.
-  if (!hydrated) {
+  if (!hydrated || !utmsHydrated) {
     return (
       <div className="space-y-8" aria-hidden>
         <div className="h-8 w-64 animate-pulse rounded bg-foreground/10" />
