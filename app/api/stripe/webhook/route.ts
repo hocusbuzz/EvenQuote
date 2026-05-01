@@ -46,6 +46,8 @@ import { createLogger } from '@/lib/logger';
 import { verifyStripeWebhook } from '@/lib/security/stripe-auth';
 import { captureException, captureMessage } from '@/lib/observability/sentry';
 import { sendEmail } from '@/lib/email/resend';
+import { trackServer } from '@/lib/analytics/track-server';
+import type { AnalyticsEventParams } from '@/lib/analytics/events';
 
 const log = createLogger('stripe/webhook');
 
@@ -234,12 +236,16 @@ async function handleCheckoutCompleted(
   // 3. Flip the quote_request to 'paid'. Only do this if the current row
   //    is still pending_payment — avoids clobbering a later status
   //    (e.g. if some other flow advanced it to 'calling' already).
+  //    Joins service_categories so the post-payment side effects can tag
+  //    analytics events with the vertical without a second round-trip.
   const { data: updated, error: updateErr } = await admin
     .from('quote_requests')
     .update({ status: 'paid' })
     .eq('id', requestId)
     .eq('status', 'pending_payment')
-    .select('id, status, intake_data, city, state')
+    .select(
+      'id, status, intake_data, city, state, service_categories ( slug )'
+    )
     .maybeSingle();
 
   if (updateErr) {
@@ -267,6 +273,15 @@ async function handleCheckoutCompleted(
     session.customer_details?.email?.trim().toLowerCase() ??
     null;
 
+  // Pull the category slug off the joined row. Supabase-js returns a
+  // nested-object OR an array depending on the FK shape; normalize.
+  type CategoryRel = { slug?: string } | null;
+  const catRaw = (updated as { service_categories?: CategoryRel | CategoryRel[] })
+    .service_categories;
+  const categorySlug = Array.isArray(catRaw)
+    ? (catRaw[0]?.slug ?? null)
+    : (catRaw?.slug ?? null);
+
   // 5. Schedule post-payment side effects async via waitUntil. This is
   //    the #121 fix: the webhook used to do magic link + Places seed +
   //    Vapi dispatch synchronously before returning, which can take 12+
@@ -291,7 +306,14 @@ async function handleCheckoutCompleted(
   //    response on errors there. That's correct — Stripe shouldn't
   //    retry magic-link or seeding hiccups.
   waitUntil(
-    runPostPaymentSideEffects({ requestId, contactEmail })
+    runPostPaymentSideEffects({
+      requestId,
+      contactEmail,
+      categorySlug,
+      // amount_total is in cents; convert to dollars for the analytics
+      // event value (Meta + GA4 both expect a decimal currency amount).
+      amountUsd: amountTotal / 100,
+    })
   );
 
   return 'Processed (side effects async)';
@@ -316,8 +338,10 @@ async function handleCheckoutCompleted(
 async function runPostPaymentSideEffects(args: {
   requestId: string;
   contactEmail: string | null;
+  categorySlug: string | null;
+  amountUsd: number;
 }): Promise<void> {
-  const { requestId, contactEmail } = args;
+  const { requestId, contactEmail, categorySlug, amountUsd } = args;
 
   // ── A. Magic link ───────────────────────────────────────────────
   if (contactEmail) {
@@ -440,6 +464,51 @@ async function runPostPaymentSideEffects(args: {
     captureException(err, {
       tags: { route: 'stripe/webhook', site: 'enqueue-calls', requestId },
     });
+  }
+
+  // ── D. Analytics: quote_request_paid (server-side backstop) ─────
+  // The success page also fires `quote_request_paid` client-side via
+  // the Pixel. This is the BACKSTOP for the close-the-tab case where
+  // the customer pays but never lands on /get-quotes/success — the
+  // client-side fire never runs and the conversion goes uncounted,
+  // which under-reports paid-traffic ROAS.
+  //
+  // Dedupe: trackServer's Meta CAPI path uses event_id =
+  // `quote_request_paid:<requestId>`. The client-side Pixel fire (in
+  // components/get-quotes/track-paid-on-mount.tsx) uses the matching
+  // eventID. Meta dedupes by event_id so the conversion is counted
+  // exactly once even when both sides fire. GA4's Measurement
+  // Protocol doesn't dedupe automatically, but server-fired events
+  // arrive in a different `engagement_time_msec` window so they
+  // generally don't conflate with the client fire in funnel reports.
+  //
+  // Fire-and-forget: trackServer swallows per-provider failures
+  // internally; we wrap in a separate try so an unexpected throw
+  // doesn't bubble out of the async post-payment work.
+  try {
+    const KNOWN_VERTICALS: ReadonlySet<NonNullable<AnalyticsEventParams['vertical']>> =
+      new Set(['moving', 'cleaning', 'handyman', 'lawn-care', 'junk-removal']);
+    const vertical =
+      categorySlug &&
+      KNOWN_VERTICALS.has(categorySlug as NonNullable<AnalyticsEventParams['vertical']>)
+        ? (categorySlug as NonNullable<AnalyticsEventParams['vertical']>)
+        : undefined;
+
+    await trackServer({
+      name: 'quote_request_paid',
+      clientId: requestId,
+      params: {
+        vertical,
+        value: amountUsd,
+        currency: 'USD',
+        request_id: requestId,
+      },
+    });
+  } catch (err) {
+    // Already swallowed inside trackServer per-provider; this catch
+    // is belt-and-suspenders. Log only — analytics MUST NOT break
+    // the post-payment flow.
+    log.warn('analytics quote_request_paid fire threw', { err, requestId });
   }
 }
 

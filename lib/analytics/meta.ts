@@ -115,10 +115,20 @@ export function metaClientEvent(
     metaParams.content_type = 'product';
   }
 
+  // Dedupe key — Meta dedupes a client-side fire against a server-side
+  // CAPI fire when both carry the same eventID. The server-side path
+  // (sendMetaServerEvent below) constructs `${name}:${clientId}`, and
+  // we mirror that shape here using params.request_id as the clientId.
+  // For events without a request_id (e.g. the funnel-top `Lead` before
+  // a request UUID exists), we omit eventID — there's no server-side
+  // counterpart to dedupe against.
+  const eventID =
+    params.request_id !== undefined ? `${name}:${params.request_id}` : undefined;
+
   if (spec.kind === 'standard') {
-    window.fbq('track', spec.name, metaParams);
+    window.fbq('track', spec.name, metaParams, eventID ? { eventID } : undefined);
   } else {
-    window.fbq('trackCustom', spec.name, metaParams);
+    window.fbq('trackCustom', spec.name, metaParams, eventID ? { eventID } : undefined);
   }
   return true;
 }

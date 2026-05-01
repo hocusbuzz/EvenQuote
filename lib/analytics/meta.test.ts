@@ -29,17 +29,19 @@ describe('metaClientEvent', () => {
     expect(metaClientEvent('quote_request_started')).toBe(false);
   });
 
-  it('maps quote_request_started → fbq("track", "Lead", ...)', () => {
+  it('maps quote_request_started → fbq("track", "Lead", ...) WITHOUT eventID (no request_id yet)', () => {
     const fbq = vi.fn();
     (globalThis as unknown as { window: { fbq: unknown } }).window = { fbq };
 
     metaClientEvent('quote_request_started', { vertical: 'moving' });
 
     expect(fbq).toHaveBeenCalledTimes(1);
-    expect(fbq).toHaveBeenCalledWith('track', 'Lead', {});
+    // 4th arg is `undefined` when there's no request_id to dedupe on —
+    // the funnel-top Lead event has no server-side counterpart.
+    expect(fbq).toHaveBeenCalledWith('track', 'Lead', {}, undefined);
   });
 
-  it('maps quote_request_paid → fbq("track", "Purchase", { value, currency, content_ids })', () => {
+  it('maps quote_request_paid → fbq("track", "Purchase", ...) WITH eventID for server dedupe', () => {
     const fbq = vi.fn();
     (globalThis as unknown as { window: { fbq: unknown } }).window = { fbq };
 
@@ -51,25 +53,38 @@ describe('metaClientEvent', () => {
     });
 
     expect(fbq).toHaveBeenCalledTimes(1);
-    expect(fbq).toHaveBeenCalledWith('track', 'Purchase', {
-      value: 9.99,
-      currency: 'USD',
-      content_ids: ['req-abc'],
-      content_type: 'product',
-    });
+    expect(fbq).toHaveBeenCalledWith(
+      'track',
+      'Purchase',
+      {
+        value: 9.99,
+        currency: 'USD',
+        content_ids: ['req-abc'],
+        content_type: 'product',
+      },
+      // eventID matches the server-side CAPI event_id shape exactly,
+      // so a Stripe-webhook server fire and a /success client fire
+      // dedupe to one Purchase on Meta's side.
+      { eventID: 'quote_request_paid:req-abc' },
+    );
   });
 
-  it('maps quote_delivered → fbq("trackCustom", "QuoteDelivered", ...)', () => {
+  it('maps quote_delivered → fbq("trackCustom", "QuoteDelivered", ...) WITH eventID', () => {
     const fbq = vi.fn();
     (globalThis as unknown as { window: { fbq: unknown } }).window = { fbq };
 
     metaClientEvent('quote_delivered', { request_id: 'req-xyz' });
 
     expect(fbq).toHaveBeenCalledTimes(1);
-    expect(fbq).toHaveBeenCalledWith('trackCustom', 'QuoteDelivered', {
-      content_ids: ['req-xyz'],
-      content_type: 'product',
-    });
+    expect(fbq).toHaveBeenCalledWith(
+      'trackCustom',
+      'QuoteDelivered',
+      {
+        content_ids: ['req-xyz'],
+        content_type: 'product',
+      },
+      { eventID: 'quote_delivered:req-xyz' },
+    );
   });
 
   it('does not include vertical in Meta params (it is not a Meta-recognized field)', () => {
