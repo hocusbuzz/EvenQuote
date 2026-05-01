@@ -36,6 +36,7 @@
 // ─────────────────────────────────────────────────────────────────────
 
 import { NextResponse, type NextRequest } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import type Stripe from 'stripe';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { sendPaymentMagicLink } from '@/lib/actions/post-payment';
@@ -257,9 +258,8 @@ async function handleCheckoutCompleted(
     return 'Payment recorded; status was already advanced';
   }
 
-  // 4. Post-payment side effects. Best-effort — if either fails we log but
-  //    still return success so Stripe doesn't retry. The payment row is
-  //    already written, so a reconciler/support can re-trigger these.
+  // 4. Compute contact email NOW (sync) — we have the intake_data in
+  //    hand and the async function shouldn't have to re-read it.
   type IntakeShape = { contact_email?: string; contact_name?: string };
   const intake = (updated.intake_data ?? {}) as IntakeShape;
   const contactEmail =
@@ -267,6 +267,59 @@ async function handleCheckoutCompleted(
     session.customer_details?.email?.trim().toLowerCase() ??
     null;
 
+  // 5. Schedule post-payment side effects async via waitUntil. This is
+  //    the #121 fix: the webhook used to do magic link + Places seed +
+  //    Vapi dispatch synchronously before returning, which can take 12+
+  //    seconds (Stripe's median was 1.9s, max 11.9s in the first week
+  //    of prod). Stripe times out at 30s but pays cost retries on
+  //    anything over 5s. Now the webhook returns within ~200ms after
+  //    the DB writes, and the slow work continues in the background.
+  //
+  //    Idempotency story (no regression):
+  //      • payments insert idempotency stays on the sync path (above).
+  //        A Stripe retry hits the unique index and short-circuits.
+  //      • sendPaymentMagicLink: duplicate magic links are harmless —
+  //        Supabase Auth treats each as a fresh OTP.
+  //      • seedBusinessesForRequest: idempotent via the
+  //        businesses_seeded_at sentinel.
+  //      • enqueueQuoteCalls → runCallBatch: idempotent via
+  //        vapi_batch_started_at + status check (claim-once semantics).
+  //
+  //    Failure visibility: the async function logs + captureException's
+  //    every error path. We don't lose ops signal when work moves
+  //    off-thread; we lose only the ability to fail the webhook
+  //    response on errors there. That's correct — Stripe shouldn't
+  //    retry magic-link or seeding hiccups.
+  waitUntil(
+    runPostPaymentSideEffects({ requestId, contactEmail })
+  );
+
+  return 'Processed (side effects async)';
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Post-payment side effects (#121 — async via waitUntil)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Three things happen here, all best-effort with their own error
+// envelopes. None of them blocks the Stripe 200 response; all of them
+// log + Sentry-capture on failure.
+//
+//   A. sendPaymentMagicLink   — passwordless sign-in for guest claim flow
+//   B. seedBusinessesForRequest — Google Places searchText for cold zips
+//   C. enqueueQuoteCalls      — kick off Vapi dispatch (or defer per #117)
+//      (with the existing advanced:false → park-for-refund handling)
+//
+// Order matters: seed before enqueue because the engine's selector reads
+// the freshly seeded rows. Magic-link is independent; we kick it off
+// first so the user has the email by the time they visit /success.
+async function runPostPaymentSideEffects(args: {
+  requestId: string;
+  contactEmail: string | null;
+}): Promise<void> {
+  const { requestId, contactEmail } = args;
+
+  // ── A. Magic link ───────────────────────────────────────────────
   if (contactEmail) {
     try {
       await sendPaymentMagicLink({
@@ -275,9 +328,6 @@ async function handleCheckoutCompleted(
       });
     } catch (err) {
       log.error('magic link send failed', { err, requestId });
-      // Paid user can't sign in to claim — high-visibility surface for
-      // the error tracker. Tag with the site so alerts route to the
-      // right on-call mental model. No-op until Sentry DSN lands.
       captureException(err, {
         tags: { route: 'stripe/webhook', site: 'magic-link', requestId },
       });
@@ -286,13 +336,13 @@ async function handleCheckoutCompleted(
     log.warn('no contact email found for magic link', { requestId });
   }
 
-  // 5. On-demand business seeding. Fires Google Places searchText
-  //    biased to the request's origin coords so the call engine has a
-  //    fresh, geo-relevant pool to pick from. Best-effort: if Places
-  //    is rate-limited, down, or returns zero rows, the engine still
-  //    runs against whatever's in the DB (manual ingest, prior seeds).
-  //    Idempotent via quote_requests.businesses_seeded_at — a webhook
-  //    replay won't double-charge the Places API.
+  // ── B. On-demand seed ───────────────────────────────────────────
+  // Fires Google Places searchText biased to the request's origin
+  // coords so the call engine has a fresh, geo-relevant pool to pick
+  // from. Best-effort: Places rate-limit / outage / zero-result is
+  // not fatal — the engine falls back to whatever's already in the
+  // businesses table (manual ingest, prior seeds). Idempotent via
+  // quote_requests.businesses_seeded_at sentinel.
   try {
     const seed = await seedBusinessesForRequest({ quoteRequestId: requestId });
     if (seed.ok) {
@@ -307,6 +357,7 @@ async function handleCheckoutCompleted(
     });
   }
 
+  // ── C. Enqueue Vapi calls ───────────────────────────────────────
   try {
     const enq = await enqueueQuoteCalls({ quoteRequestId: requestId });
 
@@ -390,8 +441,6 @@ async function handleCheckoutCompleted(
       tags: { route: 'stripe/webhook', site: 'enqueue-calls', requestId },
     });
   }
-
-  return 'Processed';
 }
 
 // ─────────────────────────────────────────────────────────────────────
