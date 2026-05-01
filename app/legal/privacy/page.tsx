@@ -100,15 +100,20 @@ export default function PrivacyPage() {
           session authentication and CSRF protection.
         </li>
         <li>
-          <strong>Analytics:</strong> we use Google Analytics 4 to count
-          how many people visit, start a quote request, complete payment,
-          and receive their report. GA4 is configured with{' '}
+          <strong>Analytics:</strong> we use Google Analytics 4 and the
+          Meta (Facebook) Pixel to count how many people visit, start a
+          quote request, and complete payment. GA4 runs with{' '}
           <em>anonymize_ip</em> on (your IP is truncated before storage)
           and <em>non_personalized_ads</em> on (your visit is not added
-          to Google&rsquo;s ads-targeting graph). The events GA4 sees
-          include the page URL (which may contain a UTM tag from an ad
-          you clicked) and an opaque request UUID &mdash; never your
-          name, phone, email, or address.
+          to Google&rsquo;s ads-targeting graph). The Meta Pixel is used
+          only to measure the conversion funnel from our paid Facebook /
+          Instagram ads &mdash; we do not maintain custom audiences,
+          run lookalike modeling, or use Meta&rsquo;s &ldquo;Advanced
+          Matching&rdquo; (which would hash and send your email/phone).
+          Events sent to either platform include the page URL (which may
+          contain a UTM tag from an ad you clicked), an opaque request
+          UUID, and the $9.99 transaction value &mdash; never your name,
+          phone, email, or address.
         </li>
       </ul>
 
@@ -257,6 +262,13 @@ export default function PrivacyPage() {
           and delivered counts, with anonymized IP and ad-personalization
           turned off. Never your name, phone, email, or address. See the
           &ldquo;Cookies&rdquo; bullet above for details.
+        </li>
+        <li>
+          <strong>Meta (Facebook) Pixel</strong> &mdash; pageview, lead,
+          and purchase event counts from visitors who arrived via our
+          Facebook or Instagram ads, used to measure ad performance.
+          No Advanced Matching, no custom audiences from your visit.
+          See the &ldquo;Cookies&rdquo; bullet above for details.
         </li>
       </ul>
       <p>We do <strong>not</strong> share your data with:</p>

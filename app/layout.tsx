@@ -20,6 +20,7 @@ import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
 import { headers } from 'next/headers';
 import { GA4Script } from '@/lib/analytics/ga4-script';
+import { MetaPixelScript } from '@/lib/analytics/meta-script';
 import './globals.css';
 
 const fraunces = Fraunces({
@@ -196,6 +197,13 @@ export default function RootLayout({
             Threaded with the same per-request CSP nonce as the JSON-
             LD scripts above. */}
         <GA4Script nonce={nonce} />
+        {/* Meta Pixel — same load strategy + nonce as GA4 above.
+            Auto-fires PageView on init; route changes don't refire
+            (the App Router's instrumentation handles that for GA4 but
+            not Meta — Meta's own SPA-tracking expects a single page-
+            load context per session, which is conservative but fine
+            for our funnel-counting needs). */}
+        <MetaPixelScript nonce={nonce} />
       </body>
     </html>
   );

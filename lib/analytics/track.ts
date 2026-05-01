@@ -18,6 +18,7 @@
 //     to all platforms. Centralizing here keeps that lock-step.
 
 import { gaClientEvent } from './ga4';
+import { metaClientEvent } from './meta';
 import type { AnalyticsEventName, AnalyticsEventParams } from './events';
 
 /**
@@ -33,9 +34,11 @@ export function trackClient(
   name: AnalyticsEventName,
   params: AnalyticsEventParams = {}
 ): void {
-  // Currently single-provider; preserved as a fan-out shape so adding
-  // Meta + Reddit is one extra call each, no call-site changes.
+  // Fan-out: each provider's client helper no-ops gracefully when its
+  // env-var/script isn't ready, so calling all of them unconditionally
+  // is safe. Reddit slots in alongside when its Pixel ID lands.
   gaClientEvent(name, params);
+  metaClientEvent(name, params);
 }
 
 // Server-side fan-out lives in `./track-server.ts` so importing this

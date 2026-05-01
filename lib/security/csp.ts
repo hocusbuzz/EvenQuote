@@ -73,13 +73,26 @@ export function buildCsp(opts: {
     ? ' https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com'
     : '';
 
+  // Meta Pixel hosts. Same belt-and-suspenders rationale as GA4.
+  //   • connect.facebook.net         — fbevents.js loader
+  //   • *.facebook.com               — event beacons (/tr endpoint)
+  //   • *.facebook.net               — auxiliary CDN paths
+  // img-src is already permissive enough (`https:`) to cover the
+  // tracking-pixel image beacon Meta uses as a fallback transport.
+  const metaScriptHosts = process.env.NEXT_PUBLIC_META_PIXEL_ID
+    ? ' https://connect.facebook.net'
+    : '';
+  const metaConnectHosts = process.env.NEXT_PUBLIC_META_PIXEL_ID
+    ? ' https://*.facebook.com https://*.facebook.net'
+    : '';
+
   const directives = [
     `default-src 'self'`,
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${ga4ScriptHosts}`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${ga4ScriptHosts}${metaScriptHosts}`,
     `style-src 'self' 'unsafe-inline'`,
     `img-src 'self' blob: data: https:`,
     `font-src 'self' data:`,
-    `connect-src 'self' ${supabaseOrigin} https://*.supabase.co https://api.stripe.com${ga4ConnectHosts}`,
+    `connect-src 'self' ${supabaseOrigin} https://*.supabase.co https://api.stripe.com${ga4ConnectHosts}${metaConnectHosts}`,
     `frame-src 'self' https://checkout.stripe.com https://js.stripe.com`,
     `frame-ancestors 'none'`,
     `form-action 'self' https://checkout.stripe.com`,

@@ -111,6 +111,25 @@ const ServerEnvSchema = z.object({
     .optional(),
   GA4_API_SECRET: z.string().min(8, 'GA4 API secret looks short').optional(),
 
+  // ─── Analytics — Meta Pixel (optional) ──────────────────────────
+  // Pixel ID is a 15-16 digit numeric string. Used by the client-
+  // side fbq script in lib/analytics/meta-script.tsx. Like GA4, it's
+  // optional at schema level — non-prod skips it cleanly.
+  //
+  // META_CONVERSIONS_API_TOKEN is the SERVER-SIDE complement (Meta's
+  // analog of GA4_API_SECRET). NOT required by the Pixel itself —
+  // when missing, the client-side fbq still fires and we just skip
+  // the server-side Conversions API fan-out for quote_delivered.
+  // Generate in Meta Events Manager → Pixel → Settings → CAPI.
+  NEXT_PUBLIC_META_PIXEL_ID: z
+    .string()
+    .regex(/^\d{10,20}$/, 'Meta Pixel ID is 10-20 digits')
+    .optional(),
+  META_CONVERSIONS_API_TOKEN: z
+    .string()
+    .min(20, 'Meta CAPI token looks short')
+    .optional(),
+
   // ─── Maintenance mode ──────────────────────────────────────────
   MAINTENANCE_MODE: BooleanString.optional(),
   MAINTENANCE_PREVIEW_TOKEN: z.string().optional(),
