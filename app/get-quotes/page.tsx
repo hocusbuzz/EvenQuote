@@ -30,7 +30,7 @@ export const dynamic = 'force-dynamic';
 
 // These slugs render a live intake form; everything else renders the
 // waitlist capture. Keep in sync with app/get-quotes/[category]/page.tsx.
-const LIVE_SLUGS = new Set(['moving', 'cleaning']);
+const LIVE_SLUGS = new Set(['moving', 'cleaning', 'handyman']);
 
 type CategoryRow = {
   name: string;

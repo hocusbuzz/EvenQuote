@@ -37,7 +37,7 @@ const faqs = [
   },
   {
     q: 'What areas do you cover?',
-    a: 'US only for now. Moving and house cleaning are live; handymen and lawn care are rolling out next. We start with a vertical once we have enough quality local businesses seeded to make the report feel comprehensive.',
+    a: 'US only for now. Moving, house cleaning, and handyman quotes are live; lawn care is rolling out next. We start with a vertical once we have enough quality local businesses seeded to make the report feel comprehensive.',
   },
   {
     q: 'Will businesses start spamming my phone?',

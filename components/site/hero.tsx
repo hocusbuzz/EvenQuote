@@ -251,9 +251,11 @@ function VerticalStrip() {
     <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs uppercase tracking-widest text-muted-foreground">
       {STRIP_LABELS.map((label, i) => {
         const isActive = i === activeIndex;
-        // Items 2 & 3 (handymen, lawn care) are marked "soon" — match
-        // the prior copy's intent. Movers/cleaners are live.
-        const isComingSoon = i >= 2;
+        // Lawn care is the only remaining "soon" vertical (movers,
+        // cleaners, handymen are all live as of 2026-05-01). When
+        // lawn care ships, drop this branch entirely and remove
+        // the (soon) suffix render below.
+        const isComingSoon = i >= 3;
 
         return (
           <span key={label} className="inline-flex items-center gap-x-4">
