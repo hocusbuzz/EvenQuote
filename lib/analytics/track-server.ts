@@ -13,6 +13,7 @@ import 'server-only';
 // API will fan out alongside when their secrets land.
 
 import { sendServerEvent } from './ga4';
+import { sendMetaServerEvent } from './meta';
 import type { AnalyticsEventName, AnalyticsEventParams } from './events';
 
 /**
@@ -29,16 +30,30 @@ export async function trackServer(args: {
   /**
    * Stable identifier for the user-journey this event belongs to.
    * For events tied to a quote_request, pass the quote_request.id —
-   * it correlates well in GA4's user explorations and is opaque
-   * (not personally identifying).
+   * it correlates well in GA4's user explorations and becomes the
+   * (hashed) external_id on Meta CAPI's side. Opaque, not personally
+   * identifying.
    */
   clientId: string;
   params?: AnalyticsEventParams;
-}): Promise<{ ga4: { ok: boolean; reason?: string } }> {
-  const ga4 = await sendServerEvent({
-    name: args.name,
-    clientId: args.clientId,
-    params: args.params,
-  });
-  return { ga4 };
+}): Promise<{
+  ga4: { ok: boolean; reason?: string };
+  meta: { ok: boolean; reason?: string };
+}> {
+  // Run both providers in parallel — they're independent fetches with
+  // ~100-300ms latency each. Sequential would double the cron's
+  // analytics overhead per request.
+  const [ga4, meta] = await Promise.all([
+    sendServerEvent({
+      name: args.name,
+      clientId: args.clientId,
+      params: args.params,
+    }),
+    sendMetaServerEvent({
+      name: args.name,
+      clientId: args.clientId,
+      params: args.params,
+    }),
+  ]);
+  return { ga4, meta };
 }

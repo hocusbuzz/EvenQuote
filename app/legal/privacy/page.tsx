@@ -264,11 +264,15 @@ export default function PrivacyPage() {
           &ldquo;Cookies&rdquo; bullet above for details.
         </li>
         <li>
-          <strong>Meta (Facebook) Pixel</strong> &mdash; pageview, lead,
-          and purchase event counts from visitors who arrived via our
-          Facebook or Instagram ads, used to measure ad performance.
-          No Advanced Matching, no custom audiences from your visit.
-          See the &ldquo;Cookies&rdquo; bullet above for details.
+          <strong>Meta (Facebook) Pixel + Conversions API</strong> &mdash;
+          pageview, lead, purchase, and quote-delivered event counts
+          from visitors who arrived via our Facebook or Instagram ads,
+          used to measure ad performance. No Advanced Matching, no
+          custom audiences from your visit. The Conversions API
+          (server-side fan-out) sends only the SHA-256 hash of an
+          opaque request UUID as the user identifier &mdash; never your
+          name, phone, email, or address. See the &ldquo;Cookies&rdquo;
+          bullet above for details.
         </li>
       </ul>
       <p>We do <strong>not</strong> share your data with:</p>

@@ -124,27 +124,54 @@ export function metaClientEvent(
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Server-side stub (Conversions API)
+// Server-side (Conversions API)
 // ──────────────────────────────────────────────────────────────────
 
+const CAPI_ENDPOINT_VERSION = 'v21.0';
+
+// SHA-256 hash for the `external_id` user-data field. CAPI requires
+// every event to carry at least one user identifier; for events
+// firing from a cron with no live browser session, `external_id` is
+// the path of least friction — opaque to Meta, stable across
+// duplicate events for the same quote_request, never personally
+// identifying. We hash it (Meta hashes external_id automatically on
+// their side too, but pre-hashing avoids surprising-them failures
+// across versions).
+async function sha256Hex(input: string): Promise<string> {
+  // Web Crypto is available in Edge runtime AND Node 16+. Importing
+  // node:crypto would break the edge build path.
+  const data = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 /**
- * Fire a Meta CAPI event from a server context. STUB today.
+ * Fire a Meta Conversions API event from a server context.
  *
- * Returns `{ ok: false, reason: 'capi-not-wired' }` when the access
- * token isn't set OR when the CAPI path isn't implemented yet.
+ * No-op (returns `{ ok: false, reason: 'capi-not-configured' }`) when
+ * either env var is missing — production must have both, but staging
+ * / preview / local without Meta should still boot. Errors are
+ * swallowed and logged via the return shape — analytics MUST NOT
+ * throw out of a webhook or cron path.
  *
- * Why not implemented for the Day-8 launch:
- *   • CAPI requires a payload of "user_data" identifiers (hashed
- *     email / phone / IP / user-agent + Meta cookie fbp / fbc) that
- *     we don't have on the server side without plumbing the cookies
- *     through from the request that fires the event.
- *   • The client-side Pixel covers the two ad-bidding-relevant
- *     events (Lead, Purchase). quote_delivered is an internal
- *     funnel-tracking event with no ad-platform optimization value.
- *   • Wiring CAPI properly is ~half a day of work; the Day-8 launch
- *     can ship without it. #127 tracks the follow-up.
+ * `clientId` becomes `external_id` on Meta's side (after SHA-256).
+ * For events tied to a quote_request, pass quote_request.id — same
+ * value as the GA4 client_id, so cross-platform funnel reports
+ * line up.
+ *
+ * Event-name mapping comes from META_EVENT_MAP (same source of truth
+ * as the client-side fbq call). `quote_delivered` becomes the custom
+ * event 'QuoteDelivered'.
+ *
+ * `event_id` lets Meta dedupe a server-side fire against a sibling
+ * client-side fire with the same id. We use `<eventName>:<clientId>`
+ * — for events that fire from BOTH paths (none today, but the
+ * follow-up backstop for quote_request_paid would), passing the same
+ * clientId from both sides yields the same event_id and Meta dedupes.
  */
-export async function sendMetaServerEvent(_args: {
+export async function sendMetaServerEvent(args: {
   name: AnalyticsEventName;
   clientId: string;
   params?: AnalyticsEventParams;
@@ -154,9 +181,81 @@ export async function sendMetaServerEvent(_args: {
   if (!token || !pixelId) {
     return { ok: false, reason: 'capi-not-configured' };
   }
-  // #127 — implement Conversions API wire-up. Until then, this is a
-  // no-op even when configured (loud-OK rather than loud-failure).
-  return { ok: false, reason: 'capi-not-wired' };
+
+  const spec = META_EVENT_MAP[args.name];
+  if (spec.kind === 'skip') {
+    return { ok: false, reason: 'meta-event-not-mapped' };
+  }
+  // For server-side, both standard and custom events use the same
+  // event_name field — Meta differentiates by whether the name
+  // matches their standard list.
+  const eventName = spec.name;
+
+  const externalIdHashed = await sha256Hex(args.clientId);
+
+  // custom_data payload — only Meta-recognized keys flow here, same
+  // shape as the client-side `metaParams` builder above. Keep this
+  // narrow so PII never leaks to Meta accidentally.
+  const customData: Record<string, unknown> = {};
+  if (args.params?.value !== undefined) customData.value = args.params.value;
+  if (args.params?.currency !== undefined) customData.currency = args.params.currency;
+  if (args.params?.request_id !== undefined) {
+    customData.content_ids = [args.params.request_id];
+    customData.content_type = 'product';
+  }
+
+  const body = JSON.stringify({
+    data: [
+      {
+        event_name: eventName,
+        event_time: Math.floor(Date.now() / 1000),
+        // `website` is correct for events that originated from a web
+        // touchpoint — including server-side fires where the original
+        // user action was a web click. `system_generated` exists too
+        // but Meta's docs steer you to `website` for our shape.
+        action_source: 'website',
+        // Stable per-(event,clientId) so a future client+server
+        // double-fire of the same event dedupes on Meta's side.
+        event_id: `${eventName}:${args.clientId}`,
+        user_data: {
+          external_id: externalIdHashed,
+        },
+        custom_data: customData,
+      },
+    ],
+    // Set to 'TEST12345' (or similar) when debugging via Meta's Test
+    // Events tab. Off by default in prod. Pulled from env so we don't
+    // ship a constant that pollutes real metrics.
+    ...(process.env.META_CAPI_TEST_EVENT_CODE
+      ? { test_event_code: process.env.META_CAPI_TEST_EVENT_CODE }
+      : {}),
+    access_token: token,
+  });
+
+  const url =
+    `https://graph.facebook.com/${CAPI_ENDPOINT_VERSION}/` +
+    `${encodeURIComponent(pixelId)}/events`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+      // Keepalive so a serverless function shutting down right after
+      // the call doesn't drop the request mid-flight.
+      keepalive: true,
+    });
+
+    if (!res.ok) {
+      return { ok: false, reason: `capi-${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : 'fetch-failed',
+    };
+  }
 }
 
 // Exported for tests so the mapping can be inspected without
