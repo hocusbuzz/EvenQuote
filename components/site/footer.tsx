@@ -1,6 +1,13 @@
 // Site footer. Editorial/newspaper feel — big type, monospace meta.
-// Keeping it deliberately sparse: EvenQuote is pre-launch and a
-// footer bloated with fake legal/social links would read as padding.
+// Keeping it deliberately sparse — a footer bloated with fake
+// social/affiliate links would read as padding rather than substance.
+//
+// Marketing audit (2026-05-01): the "v0.1 — pre-launch" badge was
+// removed from line 93. Reasoning from marketing/INBOX_FOR_DEV_CHANNEL.md:
+// charging $9.99 for real work is incompatible with a "pre-launch"
+// signal — every visitor reading that decided not to trust us with
+// their card. Internal version tracking now lives in a /api/version
+// endpoint + git history, not user-visible UI.
 
 import Link from 'next/link';
 
@@ -90,7 +97,6 @@ export function SiteFooter() {
               Terms
             </Link>
           </div>
-          <p className="uppercase tracking-widest">v0.1 — pre-launch</p>
         </div>
       </div>
     </footer>
