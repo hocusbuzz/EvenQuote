@@ -81,6 +81,14 @@ const ALLOWED_INTAKE_KEYS: ReadonlySet<string> = new Set([
   'ideal_date',
   'materials_needed',
 
+  // ── Lawn-care vertical ──
+  // No free-text job description — `additional_notes` covers anything
+  // unstructured and goes through the SCRUBBED path below.
+  'lot_size',
+  'service_type',  // multiselect; flattened to comma-list by the loop
+  // 'frequency' is already in this allowlist (cleaning shares it)
+  'start_date',
+
   // ── Shared ──
   // additional_notes + job_description handled separately (scrubbed) —
   // NOT here, so the loop below skips them and we add the scrubbed
