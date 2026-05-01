@@ -18,6 +18,7 @@ import { SiteFooter } from '@/components/site/footer';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { IntakeFormShell } from '@/components/get-quotes/form-shell';
 import { CleaningFormShell } from '@/components/get-quotes/cleaning-form-shell';
+import { HandymanFormShell } from '@/components/get-quotes/handyman-form-shell';
 import { WaitlistCapture } from '@/components/get-quotes/waitlist-capture';
 
 // Force per-request SSR. Without this, Next.js may statically generate the
@@ -31,6 +32,7 @@ export const dynamic = 'force-dynamic';
 const LIVE_FORMS: Record<string, React.ComponentType> = {
   moving: IntakeFormShell,
   cleaning: CleaningFormShell,
+  handyman: HandymanFormShell,
 };
 
 type CategoryRow = {

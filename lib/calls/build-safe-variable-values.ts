@@ -70,9 +70,21 @@ const ALLOWED_INTAKE_KEYS: ReadonlySet<string> = new Set([
   'flexible_dates',
   'special_items',
 
+  // ── Handyman vertical ──
+  // Note: `job_description` is free-text and can contain accidental
+  // PII ("…my address is 123 Main St"). It's NOT in this allowlist;
+  // it's added to SCRUBBED_FREE_TEXT_KEYS below alongside
+  // additional_notes so it gets PII-scrubbed before reaching the
+  // assistant.
+  'job_type',
+  'job_size',
+  'ideal_date',
+  'materials_needed',
+
   // ── Shared ──
-  // additional_notes is handled separately (scrubbed) — NOT here, so
-  // the loop below skips it and we add the scrubbed value at the end.
+  // additional_notes + job_description handled separately (scrubbed) —
+  // NOT here, so the loop below skips them and we add the scrubbed
+  // value at the end.
 ]);
 
 // Free-text fields that need PII scrubbing before they reach the
@@ -80,6 +92,7 @@ const ALLOWED_INTAKE_KEYS: ReadonlySet<string> = new Set([
 // at the call site which fields take a different code path.
 const SCRUBBED_FREE_TEXT_KEYS: ReadonlyArray<string> = [
   'additional_notes',
+  'job_description', // handyman vertical — customer's free-text job summary
 ];
 
 export type SafeVariableValues = Record<

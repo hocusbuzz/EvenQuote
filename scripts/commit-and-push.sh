@@ -79,16 +79,25 @@ fi
 # that aren't real, fix them or scope an // eslint-disable rather than
 # let them slip through.
 if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
+  # Important: use `npm run` (not `npx`) so we bind to the LOCAL
+  # binaries in node_modules/.bin — `npx tsc` sometimes resolves to
+  # an unrelated abandoned `tsc` package on the registry. `npm run`
+  # always uses package.json's script definition, which calls the
+  # local typescript install.
   echo "▶ pre-flight: tsc --noEmit"
-  if ! npx tsc --noEmit; then
+  if ! npm run --silent typecheck; then
     echo "" >&2
     echo "✘ tsc failed — fix type errors before committing." >&2
     echo "  (override with SKIP_PREFLIGHT=1 if you really must)" >&2
     exit 1
   fi
 
+  # `next lint` via `npm run lint` for the same reason. We pass
+  # --max-warnings=0 explicitly via `--` so warnings fail the gate
+  # even if package.json's `lint` script doesn't include it
+  # (Vercel's deploy gate also treats warnings as errors).
   echo "▶ pre-flight: next lint --max-warnings 0"
-  if ! npx next lint --max-warnings 0; then
+  if ! npm run --silent lint -- --max-warnings 0; then
     echo "" >&2
     echo "✘ next lint failed — fix ESLint errors before committing." >&2
     echo "  Vercel runs the same check during deploy; pushing now will" >&2
