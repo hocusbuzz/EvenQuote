@@ -512,10 +512,11 @@ export function ContactStep({ onNext, onBack }: StepProps) {
   return (
     <section>
       <h2 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
-        How should cleaners reach you?
+        How should we reach you when the quotes are ready?
       </h2>
       <p className="mt-2 text-muted-foreground">
-        We only share this with the cleaners in your final report — never for marketing.
+        We only share this in your final report — never with the cleaners we call,
+        and never for marketing.
       </p>
 
       <div className="mt-8 space-y-5">
