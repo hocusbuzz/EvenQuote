@@ -80,9 +80,21 @@ export async function GET(request: NextRequest) {
   // we only handled `code`, which broke every magic link with
   // "PKCE code verifier not found in storage."
   if (!code && !tokenHash) {
-    const url = new URL('/auth-code-error', origin);
-    url.searchParams.set('message', 'Missing authorization code');
-    return NextResponse.redirect(url);
+    // Third Supabase auth shape we have to tolerate: the IMPLICIT
+    // flow puts tokens in the URL fragment (`#access_token=…&refresh_
+    // token=…`). This is what `type=signup` confirmation links
+    // default to, even when the magic-link flow uses token_hash.
+    // The fragment is HTTP-spec-defined as user-agent-only and never
+    // arrives at the server, so we MUST hand off to a client page
+    // to read it. Browser preserves the fragment across this 302
+    // redirect, so the tokens land at /auth/callback/finish intact.
+    //
+    // Pre-2026-05-01 (May): we returned "Missing authorization code"
+    // here, breaking the very first sign-in for every signup flow
+    // — exactly what a real customer hit before this fix.
+    const finishUrl = new URL('/auth/callback/finish', origin);
+    finishUrl.searchParams.set('next', next);
+    return NextResponse.redirect(finishUrl);
   }
 
   const supabase = await createClient();

@@ -49,14 +49,37 @@ describe('/auth/callback', () => {
     captureExceptionMock.mockReset();
   });
 
-  it('redirects to /auth-code-error when no code is present', async () => {
+  it('redirects to /auth/callback/finish when neither code nor token_hash is present (fragment-flow fallback)', async () => {
+    // Locks the May 2026 fix: when Supabase uses the implicit
+    // (fragment) flow — notably for type=signup confirmation — the
+    // tokens arrive in the URL fragment which the server cannot read.
+    // We hand off to the client page at /auth/callback/finish, which
+    // CAN read the fragment and persist the session via
+    // createBrowserClient. The browser preserves the fragment across
+    // the 302, so the tokens land at /finish intact.
     const GET = await loadGet();
     const res = await GET(makeReq('/auth/callback'));
     expect(res.status).toBe(307);
     const loc = res.headers.get('location')!;
-    expect(loc).toContain('/auth-code-error');
-    expect(loc).toContain('message=');
+    expect(loc).toContain('/auth/callback/finish');
     expect(mockExchange).not.toHaveBeenCalled();
+    expect(mockVerifyOtp).not.toHaveBeenCalled();
+  });
+
+  it('preserves ?next when redirecting to /auth/callback/finish', async () => {
+    const GET = await loadGet();
+    const res = await GET(
+      makeReq(
+        '/auth/callback?next=' +
+          encodeURIComponent('/get-quotes/claim?request=abc'),
+      ),
+    );
+    expect(res.status).toBe(307);
+    const loc = res.headers.get('location')!;
+    expect(new URL(loc).pathname).toBe('/auth/callback/finish');
+    expect(new URL(loc).searchParams.get('next')).toBe(
+      '/get-quotes/claim?request=abc',
+    );
   });
 
   it('redirects to /auth-code-error with provider error message', async () => {
