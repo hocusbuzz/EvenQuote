@@ -245,7 +245,13 @@ describe('app/ capture-site shape audit (R33)', () => {
       const source = fs.readFileSync(file, 'utf8');
       total += extractCaptureCalls(source).length;
     }
-    expect(total, `route capture sites = ${total}; expected 8-20`).toBeGreaterThanOrEqual(8);
-    expect(total, `route capture sites = ${total}; expected 8-20`).toBeLessThanOrEqual(20);
+    // 2026-05-01 raised the upper bound to 24 to accommodate:
+    //   • stripe/webhook calls-scheduled-email site (#117 deferred
+    //     confirmation email)
+    //   • cron/dispatch-scheduled-requests park-for-refund site
+    //   • additional capture site from the magic-link rewrite that
+    //     splits generateLink and sendEmail per R30 reason granularity
+    expect(total, `route capture sites = ${total}; expected 8-24`).toBeGreaterThanOrEqual(8);
+    expect(total, `route capture sites = ${total}; expected 8-24`).toBeLessThanOrEqual(24);
   });
 });

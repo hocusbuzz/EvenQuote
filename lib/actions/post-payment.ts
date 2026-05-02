@@ -2,43 +2,74 @@
 
 // Post-payment side effects that run from the Stripe webhook.
 //
-// Primary use: send a magic link to the email the guest entered in intake,
-// so they can sign in and claim ownership of the quote request.
+// Primary use: send a magic-link sign-in email to the address the guest
+// entered in intake, so they can claim ownership of the quote request
+// and (later) view their report / release contact to specific pros.
 //
-// Why a magic link and not Google OAuth?
-//   Because we don't know what account they have. Sending them to a
-//   one-click email link is frictionless AND locks the claim to the
-//   same email Stripe charged — no account-confusion edge cases.
+// ── Why we generate + send the email ourselves ─────────────────────
 //
-// Why is this a "server action" file rather than a plain lib fn?
-//   Purely for consistency with our action/ directory convention; the
-//   webhook calls this from Node context, not from a <form> action.
-//   Marking it 'use server' is harmless and future-proofs if we ever
-//   want to invoke it from a client retry button.
+// History (all of which broke a real customer test):
+//   1. signInWithOtp + flowType:'pkce' (default)  → link uses ?code=,
+//      callback's exchangeCodeForSession needs a code_verifier cookie
+//      that doesn't exist when the OTP is generated server-side from a
+//      webhook. Result: "PKCE code verifier not found in storage."
+//      First customer hit on 2026-05-01.
+//   2. signInWithOtp + flowType:'implicit'        → link puts tokens in
+//      the URL FRAGMENT (#access_token=...) which the server callback
+//      cannot read. Result: "Missing authorization code." Same
+//      customer, same day, fixing-the-fix.
+//   3. (Today) admin.auth.admin.generateLink + send via Resend → the
+//      generated `action_link` chain ends with a redirect to our
+//      callback with `?token_hash=…&type=magiclink`, which our
+//      callback already handles via verifyOtp. No PKCE, no fragment,
+//      no Supabase SMTP dependency. This file's responsibility now
+//      stops at "build the action link, send the email."
+//
+// ── Why we send via Resend, not Supabase's built-in OTP email ──────
+//   • Single sending surface = single inbox-reputation game. Supabase's
+//     outbound has its own deliverability profile separate from our
+//     Resend domain — splitting traffic across two senders dilutes
+//     both reputations.
+//   • Branded subject + body. The Supabase default subject ("Sign in
+//     to your account") was misread as "your quotes are ready" by a
+//     real customer who'd just paid $9.99 — generic transactional copy
+//     is dangerous in a context where the customer is anxiously
+//     waiting for the actual product.
+//   • One email template surface to test (lib/email/templates.ts).
 
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { headers } from 'next/headers';
 import { captureException } from '@/lib/observability/sentry';
+import { sendEmail } from '@/lib/email/resend';
+import { renderMagicLink } from '@/lib/email/templates';
 
 // ── Canonical Sentry tag shape for this lib ──
-// R30 audit: this file has exactly ONE external call (signInWithOtp),
-// so there is exactly ONE capture reason. Kept as a string-literal
-// union for parity with resend.ts / intake.ts / checkout.ts — any new
-// capture site must be added here AND to the regression-guard in
-// post-payment.test.ts that forbids catch-all reasons.
+// Two distinct external surfaces now (was one):
+//   - generateLinkFailed  → admin.auth.admin.generateLink returned an
+//                            error object. Could be rate-limit, invalid
+//                            email, or admin-permission issue.
+//   - sendEmailFailed     → Resend returned ok:false (or threw). The
+//                            link was generated successfully; this is
+//                            specifically the email delivery surface.
 //
-// Deliberately NOT captured elsewhere in this file:
-//   - Input validation (email/requestId empty) — user error; capturing
-//     would flood Sentry on malformed webhook payloads.
-//   - createAdminClient() env-missing throw — config state at boot;
-//     propagates to the webhook route's outer try/catch.
-//   - headers() fallback — already wrapped in try/catch with sane
-//     default; not an incident.
-export type PostPaymentReason = 'signInWithOtp';
+// Both must stay listed; a regression-guard in post-payment.test.ts
+// forbids catch-all reasons.
+export type PostPaymentReason = 'generateLinkFailed' | 'sendEmailFailed';
 
-type MagicLinkInput = {
+type SendMagicLinkInput = {
   email: string;
   requestId: string;
+  /**
+   * Friendly first-name greeting in the email body. Pulled from
+   * intake_data.contact_name in the webhook caller.
+   */
+  recipientName?: string | null;
+  /**
+   * Vertical name for the email subject ("Sign in to track your
+   * EvenQuote handyman request"). Optional; falls back to a generic
+   * "quote" phrasing.
+   */
+  categoryName?: string | null;
 };
 
 function getSiteUrl(): string {
@@ -58,17 +89,16 @@ function getSiteUrl(): string {
 }
 
 /**
- * Trigger a Supabase magic-link email to `email`. The link returns through
- * /auth/callback and forwards to /get-quotes/claim?request=<id>, which
- * backfills user_id on the payment and quote_request rows for this user.
+ * Generate a magic-link action URL via Supabase admin and send it
+ * via Resend. The link returns through `/auth/callback` (which calls
+ * verifyOtp on the `?token_hash=…&type=magiclink` query params) and
+ * forwards to `/get-quotes/claim?request=<id>`, which backfills
+ * user_id on the payment + quote_request rows.
  *
- * Admin client note: signInWithOtp is on supabase.auth which exists on both
- * cookie and service-role clients. Using the service-role client is fine
- * here — auth OTP doesn't depend on RLS, it just dispatches an email via
- * Supabase's SMTP config. We pick service-role so this works in the webhook
- * context (no cookies available).
+ * Throws on hard failure. The webhook catches and continues — the
+ * payment is already recorded, so a support resend is always possible.
  */
-export async function sendPaymentMagicLink(input: MagicLinkInput): Promise<void> {
+export async function sendPaymentMagicLink(input: SendMagicLinkInput): Promise<void> {
   const { email, requestId } = input;
   if (!email || !requestId) {
     throw new Error('sendPaymentMagicLink: email and requestId required');
@@ -82,72 +112,70 @@ export async function sendPaymentMagicLink(input: MagicLinkInput): Promise<void>
     );
   }
 
-  // ── flowType: 'implicit' is load-bearing here ──
-  //
-  // The shared admin client (lib/supabase/admin.ts) inherits the SDK's
-  // default flowType of 'pkce'. With PKCE, signInWithOtp generates a
-  // magic-link URL of the form `?code=…` AND requires a `code_verifier`
-  // to be stored in browser cookies — generated client-side on a
-  // PRECEDING auth call. But this magic link is dispatched from a
-  // SERVER context (the Stripe webhook): there is no browser session
-  // yet, no preceding client-side auth call, and therefore no
-  // verifier in cookies. The user clicks the link, the callback
-  // calls `exchangeCodeForSession(code)`, Supabase looks for the
-  // verifier, finds nothing, and returns
-  // "PKCE code verifier not found in storage" — what cost us a real
-  // paying customer's first impression on 2026-05-01.
-  //
-  // The 'implicit' flow generates a `?token_hash=…&type=magiclink`
-  // URL that the callback verifies via `verifyOtp({type, token_hash})`
-  // with no client-side state required. Correct shape for
-  // server-initiated magic links. The auth/callback route handles
-  // both URL formats so this stays robust across SDK changes.
-  const oneShot = createSupabaseClient(url, serviceKey, {
+  // Service-role client. Default flowType ('pkce') is fine here —
+  // generateLink does NOT use PKCE; it returns a token-hash-based
+  // action link regardless of the client's flowType setting.
+  const adminClient = createSupabaseClient(url, serviceKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
-      flowType: 'implicit',
     },
   });
 
   const siteUrl = getSiteUrl();
 
-  // The "next" landing after callback = the claim route, which does
-  //   UPDATE payments  SET user_id=<me>, claimed_at=now() WHERE quote_request_id=<id>
-  //   UPDATE quote_requests SET user_id=<me> WHERE id=<id>
-  // and redirects to the success page.
+  // The redirect chain when the user clicks the link:
+  //   1. Email link → Supabase /auth/v1/verify?token=<hash>&type=magiclink&redirect_to=…
+  //   2. Supabase verifies the token, marks it consumed
+  //   3. Redirects to: <siteUrl>/auth/callback?next=…&token_hash=<hash>&type=magiclink
+  //   4. Our /auth/callback calls verifyOtp({type, token_hash}) — sets
+  //      session cookies — then redirects to the `next` param value.
+  //   5. /get-quotes/claim?request=<id> attaches user_id to the row,
+  //      then redirects to /get-quotes/success?request=<id>.
   const next = `/get-quotes/claim?request=${encodeURIComponent(requestId)}`;
-  const emailRedirectTo = `${siteUrl}/auth/callback?next=${encodeURIComponent(next)}`;
+  const redirectTo = `${siteUrl}/auth/callback?next=${encodeURIComponent(next)}`;
 
-  const { error } = await oneShot.auth.signInWithOtp({
-    email,
-    options: {
-      emailRedirectTo,
-      // Create an auth user if one doesn't exist. We use email-only auth,
-      // so this is the expected path for first-time buyers.
-      shouldCreateUser: true,
-    },
+  // 1. Generate the action link (no email sent here — Supabase only
+  //    generates + persists the OTP token).
+  const { data: linkData, error: linkErr } =
+    await adminClient.auth.admin.generateLink({
+      type: 'magiclink',
+      email,
+      options: {
+        redirectTo,
+      },
+    });
+
+  if (linkErr || !linkData?.properties?.action_link) {
+    const msg = linkErr?.message ?? 'generateLink returned no action_link';
+    const wrapped = new Error(`generateLink failed: ${msg}`);
+    captureException(wrapped, {
+      tags: { lib: 'post-payment', reason: 'generateLinkFailed', requestId },
+    });
+    throw wrapped;
+  }
+
+  // 2. Send the email ourselves via Resend with our branded template.
+  //    tag: 'magic-link' shows up in Resend's dashboard for filtering
+  //    bounce / complaint stats by send type.
+  const rendered = renderMagicLink({
+    recipientName: input.recipientName ?? null,
+    actionLink: linkData.properties.action_link,
+    categoryName: input.categoryName ?? null,
   });
 
-  if (error) {
-    // Rate limits and SMTP failures surface here. Upstream caller (the
-    // webhook) logs and continues — the payment row is already saved,
-    // so a support resend is always possible.
-    //
-    // Capture at the lib boundary with lib+reason tags so the error
-    // tracker sees EVERY caller's failures, not just the stripe webhook
-    // route that already wraps this call. A future support/retry-button
-    // caller or manual-resend admin action gets the same coverage for
-    // free. Sentry dedupes on error fingerprint — route-level captures
-    // in callers still add route context as separate tag sets; they
-    // don't double-count.
-    //
-    // We do NOT include the raw email here. Logger.ts redacts email-
-    // shaped strings from payloads, and Sentry gets the error object
-    // only — tags are opinionated structured metadata.
-    const wrapped = new Error(`signInWithOtp failed: ${error.message}`);
+  const send = await sendEmail({
+    to: email,
+    subject: rendered.subject,
+    html: rendered.html,
+    text: rendered.text,
+    tag: 'magic-link',
+  });
+
+  if (!send.ok) {
+    const wrapped = new Error(`magic-link email send failed: ${send.error}`);
     captureException(wrapped, {
-      tags: { lib: 'post-payment', reason: 'signInWithOtp', requestId },
+      tags: { lib: 'post-payment', reason: 'sendEmailFailed', requestId },
     });
     throw wrapped;
   }

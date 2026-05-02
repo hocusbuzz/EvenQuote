@@ -246,7 +246,7 @@ async function handleCheckoutCompleted(
     .eq('id', requestId)
     .eq('status', 'pending_payment')
     .select(
-      'id, status, intake_data, city, state, service_categories ( slug )'
+      'id, status, intake_data, city, state, service_categories ( slug, name )'
     )
     .maybeSingle();
 
@@ -266,23 +266,25 @@ async function handleCheckoutCompleted(
     return 'Payment recorded; status was already advanced';
   }
 
-  // 4. Compute contact email NOW (sync) — we have the intake_data in
-  //    hand and the async function shouldn't have to re-read it.
+  // 4. Compute contact email + name NOW (sync) — we have the intake_data
+  //    in hand and the async function shouldn't have to re-read it.
   type IntakeShape = { contact_email?: string; contact_name?: string };
   const intake = (updated.intake_data ?? {}) as IntakeShape;
   const contactEmail =
     intake.contact_email?.trim().toLowerCase() ??
     session.customer_details?.email?.trim().toLowerCase() ??
     null;
+  const contactName = intake.contact_name?.trim() || null;
 
-  // Pull the category slug off the joined row. Supabase-js returns a
-  // nested-object OR an array depending on the FK shape; normalize.
-  type CategoryRel = { slug?: string } | null;
+  // Pull the category slug + display name off the joined row.
+  // Supabase-js returns a nested-object OR an array depending on the
+  // FK shape; normalize either way.
+  type CategoryRel = { slug?: string; name?: string } | null;
   const catRaw = (updated as { service_categories?: CategoryRel | CategoryRel[] })
     .service_categories;
-  const categorySlug = Array.isArray(catRaw)
-    ? (catRaw[0]?.slug ?? null)
-    : (catRaw?.slug ?? null);
+  const categoryRel = Array.isArray(catRaw) ? (catRaw[0] ?? null) : (catRaw ?? null);
+  const categorySlug = categoryRel?.slug ?? null;
+  const categoryName = categoryRel?.name ?? null;
 
   // 5. Schedule post-payment side effects async via waitUntil. This is
   //    the #121 fix: the webhook used to do magic link + Places seed +
@@ -311,7 +313,9 @@ async function handleCheckoutCompleted(
     runPostPaymentSideEffects({
       requestId,
       contactEmail,
+      contactName,
       categorySlug,
+      categoryName,
       // amount_total is in cents; convert to dollars for the analytics
       // event value (Meta + GA4 both expect a decimal currency amount).
       amountUsd: amountTotal / 100,
@@ -340,10 +344,12 @@ async function handleCheckoutCompleted(
 async function runPostPaymentSideEffects(args: {
   requestId: string;
   contactEmail: string | null;
+  contactName: string | null;
   categorySlug: string | null;
+  categoryName: string | null;
   amountUsd: number;
 }): Promise<void> {
-  const { requestId, contactEmail, categorySlug, amountUsd } = args;
+  const { requestId, contactEmail, contactName, categorySlug, categoryName, amountUsd } = args;
 
   // ── A. Magic link ───────────────────────────────────────────────
   if (contactEmail) {
@@ -351,6 +357,8 @@ async function runPostPaymentSideEffects(args: {
       await sendPaymentMagicLink({
         email: contactEmail,
         requestId,
+        recipientName: contactName,
+        categoryName,
       });
     } catch (err) {
       log.error('magic link send failed', { err, requestId });

@@ -53,6 +53,7 @@ const EXPECTED_REASONS: Record<string, readonly string[]> = {
   'auth/callback': ['exchangeCodeForSessionFailed'],
   'cron/check-status': ['integrationProbeFailed'],
   'cron/check-stuck-requests': ['handlerThrew'],
+  'cron/dispatch-scheduled-requests': ['topLevelException'],
   'cron/retry-failed-calls': ['runFailed'],
   'cron/send-reports': ['runFailed'],
   'get-quotes/claim': ['requestLoadFailed', 'quoteBackfillFailed'],
@@ -86,6 +87,8 @@ const EXPECTED_STRIPE_SITES: readonly string[] = [
   'magic-link',
   'enqueue-calls',
   'seed-on-demand',
+  // 2026-05-01: deferred-confirmation email site (#117 follow-up).
+  'calls-scheduled-email',
 ];
 
 // ── File walker ──────────────────────────────────────────────────────
