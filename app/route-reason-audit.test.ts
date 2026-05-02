@@ -54,6 +54,7 @@ const EXPECTED_REASONS: Record<string, readonly string[]> = {
   'cron/check-status': ['integrationProbeFailed'],
   'cron/check-stuck-requests': ['handlerThrew'],
   'cron/dispatch-scheduled-requests': ['topLevelException'],
+  'cron/reconcile-calls': ['runFailed'],
   'cron/retry-failed-calls': ['runFailed'],
   'cron/send-reports': ['runFailed'],
   'get-quotes/claim': ['requestLoadFailed', 'quoteBackfillFailed'],
@@ -89,6 +90,12 @@ const EXPECTED_STRIPE_SITES: readonly string[] = [
   'seed-on-demand',
   // 2026-05-01: deferred-confirmation email site (#117 follow-up).
   'calls-scheduled-email',
+  // 2026-05-02: founder "new paid request" alert site (step E in
+  // runPostPaymentSideEffects). Uses `site:` rather than `reason:`
+  // because the inner try/catch is one of several side-effect
+  // boundaries inside the webhook handler — same convention as
+  // magic-link / enqueue-calls / seed-on-demand / calls-scheduled-email.
+  'new-payment-alert',
 ];
 
 // ── File walker ──────────────────────────────────────────────────────

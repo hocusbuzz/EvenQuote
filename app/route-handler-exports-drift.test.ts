@@ -92,6 +92,14 @@ const EXPECTED_ROUTES: Record<string, RouteSpec> = {
     methods: ['GET', 'POST'],
     config: ['dynamic', 'runtime'],
   },
+  'app/api/cron/dispatch-scheduled-requests/route.ts': {
+    methods: ['GET', 'POST'],
+    config: ['dynamic', 'runtime'],
+  },
+  'app/api/cron/reconcile-calls/route.ts': {
+    methods: ['GET', 'POST'],
+    config: ['dynamic', 'runtime'],
+  },
   'app/api/cron/retry-failed-calls/route.ts': {
     methods: ['GET', 'POST'],
     config: ['dynamic', 'runtime'],
@@ -190,6 +198,12 @@ const EXPECTED_ROUTES: Record<string, RouteSpec> = {
   },
   'app/auth/signout/route.ts': {
     methods: ['POST'],
+    config: [],
+  },
+  // /auth/verify — proxy that 302-redirects to Supabase's /auth/v1/verify
+  // so the email link host matches the sending domain (deliverability fix).
+  'app/auth/verify/route.ts': {
+    methods: ['GET'],
     config: [],
   },
 

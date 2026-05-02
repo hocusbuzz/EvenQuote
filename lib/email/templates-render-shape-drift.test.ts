@@ -115,11 +115,13 @@ describe('email/templates render-shape drift (R42)', () => {
     'StuckRequestRow',
     'CallsScheduledInput',
     'MagicLinkInput',
+    'NewPaymentAlertInput',
     'renderQuoteReport',
     'renderContactRelease',
     'renderStuckRequestsAlert',
     'renderCallsScheduled',
     'renderMagicLink',
+    'renderNewPaymentAlert',
   ]);
 
   it('exports exactly the expected surface (no helper leaks)', () => {
@@ -455,6 +457,7 @@ describe('email/templates render-shape drift (R42)', () => {
       'renderCallsScheduled',
       'renderContactRelease',
       'renderMagicLink',
+      'renderNewPaymentAlert',
       'renderQuoteReport',
       'renderStuckRequestsAlert',
     ]);

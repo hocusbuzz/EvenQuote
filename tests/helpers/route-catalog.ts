@@ -39,6 +39,8 @@ import path from 'node:path';
 export const NON_CACHEABLE: ReadonlySet<string> = new Set<string>([
   'app/api/cron/check-status/route.ts',
   'app/api/cron/check-stuck-requests/route.ts',
+  'app/api/cron/dispatch-scheduled-requests/route.ts',
+  'app/api/cron/reconcile-calls/route.ts',
   'app/api/cron/retry-failed-calls/route.ts',
   'app/api/cron/send-reports/route.ts',
   'app/api/csp-report/route.ts',
@@ -55,6 +57,7 @@ export const NON_CACHEABLE: ReadonlySet<string> = new Set<string>([
   'app/api/vapi/webhook/route.ts',
   'app/auth/callback/route.ts',
   'app/auth/signout/route.ts',
+  'app/auth/verify/route.ts',
   'app/get-quotes/claim/route.ts',
 ]);
 
@@ -194,6 +197,8 @@ export const DYNAMIC_EXPORT_VALUE: Readonly<
   // exports `dynamic = 'force-dynamic'`.
   'app/api/cron/check-status/route.ts': CANONICAL_DYNAMIC,
   'app/api/cron/check-stuck-requests/route.ts': CANONICAL_DYNAMIC,
+  'app/api/cron/dispatch-scheduled-requests/route.ts': CANONICAL_DYNAMIC,
+  'app/api/cron/reconcile-calls/route.ts': CANONICAL_DYNAMIC,
   'app/api/cron/retry-failed-calls/route.ts': CANONICAL_DYNAMIC,
   'app/api/cron/send-reports/route.ts': CANONICAL_DYNAMIC,
   'app/api/csp-report/route.ts': CANONICAL_DYNAMIC,
@@ -225,6 +230,9 @@ export const DYNAMIC_EXPORT_VALUE: Readonly<
   // makes it explicit at the value layer.
   'app/auth/callback/route.ts': null,
   'app/auth/signout/route.ts': null,
+  // /auth/verify is a 302 proxy to <project>.supabase.co/auth/v1/verify.
+  // Same redirect-only pattern as callback / signout.
+  'app/auth/verify/route.ts': null,
 };
 
 export const RUNTIME_EXPORT_VALUE: Readonly<
@@ -235,6 +243,8 @@ export const RUNTIME_EXPORT_VALUE: Readonly<
   // SSR clients that pull in `crypto`; dev hooks invoke scripts.
   'app/api/cron/check-status/route.ts': CANONICAL_RUNTIME,
   'app/api/cron/check-stuck-requests/route.ts': CANONICAL_RUNTIME,
+  'app/api/cron/dispatch-scheduled-requests/route.ts': CANONICAL_RUNTIME,
+  'app/api/cron/reconcile-calls/route.ts': CANONICAL_RUNTIME,
   'app/api/cron/retry-failed-calls/route.ts': CANONICAL_RUNTIME,
   'app/api/cron/send-reports/route.ts': CANONICAL_RUNTIME,
   'app/api/csp-report/route.ts': CANONICAL_RUNTIME,
@@ -262,6 +272,7 @@ export const RUNTIME_EXPORT_VALUE: Readonly<
   // export, default behavior is correct.
   'app/auth/callback/route.ts': null,
   'app/auth/signout/route.ts': null,
+  'app/auth/verify/route.ts': null,
 };
 
 /**
@@ -358,6 +369,8 @@ export const CACHE_CONTROL_ATTESTATION: Readonly<
   // the framework boundary; setting Cache-Control as well is
   // redundant for these.
   'app/api/cron/check-stuck-requests/route.ts': 'dynamic-only',
+  'app/api/cron/dispatch-scheduled-requests/route.ts': 'dynamic-only',
+  'app/api/cron/reconcile-calls/route.ts': 'dynamic-only',
   'app/api/cron/retry-failed-calls/route.ts': 'dynamic-only',
   'app/api/cron/send-reports/route.ts': 'dynamic-only',
   'app/api/csp-report/route.ts': 'dynamic-only',
@@ -377,6 +390,7 @@ export const CACHE_CONTROL_ATTESTATION: Readonly<
   // already locks that these don't export `dynamic`.
   'app/auth/callback/route.ts': 'redirect-only',
   'app/auth/signout/route.ts': 'redirect-only',
+  'app/auth/verify/route.ts': 'redirect-only',
 };
 
 /**

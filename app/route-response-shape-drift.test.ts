@@ -152,6 +152,31 @@ const EXPECTED_SHAPES: ShapeLock[] = [
     minResponses: 1,
   },
   {
+    // Vapi call-state reconciler. Success body forwards the
+    // reconcileStuckCalls() ReconcileRunResult verbatim (ok, scanned,
+    // reconciled, stillActive, notFound, rateLimited, failed, notes).
+    // Failure leg returns { ok: false, error } from the route's catch.
+    // External consumer: ops dashboards / shell scripts that tail the
+    // cron output for `failed` and `rateLimited` to alert on backlog.
+    file: 'api/cron/reconcile-calls/route.ts',
+    requiredKeys: ['ok', 'error'],
+    allowedKeys: ['ok', 'error'],
+    forbiddenKeys: ['message', 'reason', 'stack', 'status'],
+    minResponses: 1,
+  },
+  {
+    // #117 dispatch-scheduled-requests cron — picks up requests whose
+    // calls were deferred to local business hours and dials them now.
+    // Success leg forwards dispatchScheduledRequests() verbatim;
+    // failure leg returns { ok:false, error } from the route's catch.
+    // Same shape contract as the other cron routes.
+    file: 'api/cron/dispatch-scheduled-requests/route.ts',
+    requiredKeys: ['ok', 'error'],
+    allowedKeys: ['ok', 'error'],
+    forbiddenKeys: ['message', 'reason', 'stack', 'status'],
+    minResponses: 1,
+  },
+  {
     file: 'api/cron/retry-failed-calls/route.ts',
     // Success leg returns `retryFailedCalls()` result verbatim (forwarded);
     // failure leg returns `{ ok: false, error }`. The required keys
