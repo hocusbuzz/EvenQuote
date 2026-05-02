@@ -69,6 +69,8 @@ describe('app/api/cron — POST/GET parity drift (R43(b))', () => {
     const EXPECTED = new Set([
       join(CRON_DIR, 'check-status/route.ts'),
       join(CRON_DIR, 'check-stuck-requests/route.ts'),
+      join(CRON_DIR, 'dispatch-scheduled-requests/route.ts'),
+      join(CRON_DIR, 'reconcile-calls/route.ts'),
       join(CRON_DIR, 'retry-failed-calls/route.ts'),
       join(CRON_DIR, 'send-reports/route.ts'),
     ]);

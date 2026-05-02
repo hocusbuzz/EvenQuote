@@ -380,6 +380,114 @@ export async function startOutboundCall(input: StartCallInput): Promise<StartCal
 // `verifyVapiWebhook` is re-exported at the top of this file; its
 // implementation now lives in `lib/security/vapi-auth.ts`.
 
+// ─────────────────────────────────────────────────────────────────────
+// getVapiCall — read a single call's final state from Vapi's REST API.
+//
+// Used by the reconciler cron (lib/cron/reconcile-calls.ts) to recover
+// from dropped end-of-call webhooks: when the webhook never fires (dead
+// tunnel, deploy auth window, Vapi outage, route 5xx during a deploy),
+// the calls row is stuck `in_progress` forever and the parent request
+// never advances. Pulling fresh state from Vapi closes the loop.
+//
+// Returns a discriminated union so callers can distinguish:
+//   • ok:true              — got the record, may or may not have ended
+//   • ok:false notFound    — Vapi returned 404 (call id was wrong)
+//   • ok:false rateLimited — 429 with optional retry-after seconds
+//   • ok:false httpError   — any other non-2xx (status carried)
+//   • ok:false noApiKey    — VAPI_API_KEY missing (dev/test no-op)
+//   • ok:false transport   — fetch threw (DNS/TLS/timeout)
+//
+// We don't capture to Sentry here — the reconciler itself decides which
+// failure modes are worth paging on. Keep this primitive pure.
+// ─────────────────────────────────────────────────────────────────────
+
+export type VapiCallRecord = {
+  id?: string;
+  // Vapi lifecycle: queued | ringing | in-progress | forwarding | ended
+  status?: string;
+  endedReason?: string;
+  transcript?: string;
+  summary?: string;
+  recordingUrl?: string;
+  cost?: number;
+  // Vapi has used several names for the duration field over time —
+  // accept all of them and let the caller pick.
+  durationSeconds?: number;
+  duration?: number;
+  startedAt?: string;
+  endedAt?: string;
+  analysis?: {
+    structuredData?: unknown;
+    successEvaluation?: string | null;
+    summary?: string;
+  };
+};
+
+export type GetVapiCallResult =
+  | { ok: true; record: VapiCallRecord }
+  | { ok: false; reason: 'noApiKey' }
+  | { ok: false; reason: 'notFound' }
+  | { ok: false; reason: 'rateLimited'; retryAfterSec?: number }
+  | { ok: false; reason: 'httpError'; status: number; body: string }
+  | { ok: false; reason: 'transport'; message: string };
+
+export async function getVapiCall(callId: string): Promise<GetVapiCallResult> {
+  const apiKey = process.env.VAPI_API_KEY;
+  if (!apiKey) return { ok: false, reason: 'noApiKey' };
+
+  try {
+    const res = await fetch(`https://api.vapi.ai/call/${encodeURIComponent(callId)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+
+    if (res.status === 404) return { ok: false, reason: 'notFound' };
+
+    if (res.status === 429) {
+      const headerVal = res.headers.get('retry-after');
+      const parsed = headerVal ? Number.parseInt(headerVal, 10) : Number.NaN;
+      const retryAfterSec = Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+      return { ok: false, reason: 'rateLimited', retryAfterSec };
+    }
+
+    if (!res.ok) {
+      const body = await res.text();
+      return {
+        ok: false,
+        reason: 'httpError',
+        status: res.status,
+        body: body.slice(0, 500),
+      };
+    }
+
+    const record = (await res.json()) as VapiCallRecord;
+    return { ok: true, record };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'transport',
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Coerce Vapi's variable duration shape to a single seconds number.
+ * Returns undefined if no usable shape is present.
+ */
+export function vapiCallDurationSeconds(rec: VapiCallRecord): number | undefined {
+  if (typeof rec.durationSeconds === 'number') return rec.durationSeconds;
+  if (typeof rec.duration === 'number') return rec.duration;
+  if (rec.startedAt && rec.endedAt) {
+    const start = Date.parse(rec.startedAt);
+    const end = Date.parse(rec.endedAt);
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return Math.round((end - start) / 1000);
+    }
+  }
+  return undefined;
+}
+
 /**
  * Build the voicemail recap the assistant leaves when Vapi detects an
  * answering machine. Intentionally short (~15 seconds spoken) and
