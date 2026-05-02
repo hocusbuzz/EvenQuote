@@ -18,6 +18,7 @@ import { requireUser } from '@/lib/auth';
 import { createClient } from '@/lib/supabase/server';
 import { SiteNavbar } from '@/components/site/navbar';
 import { ReleaseContactButton } from './release-button';
+import { LiveStatus, type LiveCallRow } from './live-status';
 import { createLogger } from '@/lib/logger';
 import { decideEmptyState } from '@/lib/dashboard/empty-state';
 
@@ -124,6 +125,34 @@ export default async function RequestDetailPage({
     return { ...q, business: business ?? null } as QuoteRow;
   });
 
+  // Initial seed for the live-activity client component (#4 backlog).
+  // SSR-fetched once so the panel has something to render before the
+  // Realtime subscription hand-shake completes. The client takes over
+  // for subsequent updates; we never re-fetch this from SSR.
+  const { data: callsRaw } = await supabase
+    .from('calls')
+    .select(
+      `id, business_id, status, cost, duration_seconds, ended_at, created_at,
+       business:businesses!calls_business_id_fkey(name)`,
+    )
+    .eq('quote_request_id', id)
+    .order('created_at', { ascending: true });
+
+  const initialCalls: LiveCallRow[] = (callsRaw ?? []).map((c) => {
+    const bizRaw = (c as { business?: unknown }).business;
+    const business = Array.isArray(bizRaw) ? bizRaw[0] : bizRaw;
+    return {
+      id: c.id,
+      business_id: c.business_id,
+      status: c.status,
+      business_name: (business as { name?: string } | null)?.name ?? 'Local pro',
+      cost: c.cost,
+      duration_seconds: c.duration_seconds,
+      ended_at: c.ended_at,
+      created_at: c.created_at,
+    };
+  });
+
   return (
     <>
       <SiteNavbar />
@@ -149,6 +178,23 @@ export default async function RequestDetailPage({
             calls completed
           </p>
         </header>
+
+        {/* Live activity panel (#4 backlog). Hides automatically when
+            the request is terminal — see lib/dashboard/live-activity.
+            Requires Supabase Realtime to be enabled on quote_requests
+            and calls tables (Database → Replication in dashboard);
+            without it the panel still renders the SSR seed but never
+            updates and shows "Reconnecting…". */}
+        <LiveStatus
+          requestId={request.id}
+          initialCalls={initialCalls}
+          initialRequest={{
+            status: request.status,
+            total_calls_completed: request.total_calls_completed,
+            total_quotes_collected: request.total_quotes_collected,
+            total_businesses_to_call: request.total_businesses_to_call,
+          }}
+        />
 
         {quotes.length === 0 ? (
           /* Empty-state branching, R47.6 expanded.

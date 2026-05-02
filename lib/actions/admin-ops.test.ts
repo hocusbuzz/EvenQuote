@@ -83,7 +83,7 @@ vi.mock('@/lib/cron/send-reports', () => ({
 }));
 
 // ── renderQuoteReport — mocked so we can inspect inputs ──────────────
-const renderQuoteReportMock = vi.fn(() => ({
+const renderQuoteReportMock = vi.fn((_input: unknown) => ({
   subject: 'mock subject',
   html: '<p>mock</p>',
   text: 'mock',
