@@ -108,9 +108,53 @@ export async function dispatchScheduledRequests(
       }
 
       if (result.dispatched === 0 && result.selected === 0) {
-        // Concurrent cron tick or webhook claimed it first — that's fine.
+        // Two cases land here:
+        //   (a) Concurrent cron tick or webhook claimed it first — fine,
+        //       the other path will handle it.
+        //   (b) No businesses matched any tier (zip → radius → state) —
+        //       same shape as the webhook's "stranded → refund" path.
+        //       Without parity, the row sits in 'paid' forever, never
+        //       refunded, and ops only finds out from a customer support
+        //       ticket. Real example: handyman in San Marcos 92078 on
+        //       2026-05-01 — zero businesses seeded for the vertical in
+        //       that zip, dispatch threw nothing useful, row stranded.
+        //
+        // We mirror the webhook's parking: park the row in 'processing'
+        // with zero call counts so send-reports' next tick (≤5 min)
+        // picks it up via the existing zero-quote refund path. Stripe
+        // refund + apology email — no new code path.
+        //
+        // False-positive risk for case (a): if a CONCURRENT runCallBatch
+        // is mid-dispatch when we park, the parked status overwrites
+        // its later 'calling' update. Mitigation is light: send-reports'
+        // refund-zero path checks `total_calls_made = 0` before issuing.
+        // If the concurrent call has already incremented total_calls_made,
+        // send-reports will see >0 calls and skip the refund path.
+        const parkAdmin = await import('@/lib/supabase/admin').then((m) =>
+          m.createAdminClient(),
+        );
+        const { error: parkErr } = await parkAdmin
+          .from('quote_requests')
+          .update({
+            status: 'processing',
+            total_businesses_to_call: 0,
+            total_calls_completed: 0,
+          })
+          .eq('id', row.id)
+          .eq('status', 'paid'); // CAS guard — don't clobber a concurrently-advanced row
+        if (parkErr) {
+          failed.push({
+            quoteRequestId: row.id,
+            reason: `park-for-refund failed: ${parkErr.message}`,
+          });
+          log.error('park-for-refund failed', {
+            quoteRequestId: row.id,
+            err: parkErr.message,
+          });
+          continue;
+        }
         skipped += 1;
-        log.info('row already claimed elsewhere', {
+        log.warn('no businesses (or already claimed); parked for refund', {
           quoteRequestId: row.id,
         });
         continue;

@@ -43,7 +43,7 @@ export default async function AdminRequestDetailPage({
       `id, status, city, state, zip_code,
        total_businesses_to_call, total_calls_completed, total_quotes_collected,
        stripe_payment_id, user_id, intake_data, archived_at,
-       created_at, category_id,
+       created_at, category_id, scheduled_dispatch_at,
        service_categories:category_id(name, slug)`
     )
     .eq('id', id)
@@ -207,6 +207,35 @@ export default async function AdminRequestDetailPage({
             )}
           </Box>
         </div>
+
+        {/* Deferred-dispatch indicator (#117). When status='paid' but
+            scheduled_dispatch_at is set + in the future, the request was
+            received outside local business hours and is queued for the
+            evenquote-dispatch-scheduled-requests cron to pick up. Without
+            this surfaced, an ops glance sees "paid + 0 calls" and reads
+            it as a bug — exactly what happened during the May 2026
+            San Marcos test. */}
+        {request.scheduled_dispatch_at ? (
+          <div className="mt-6 rounded-md border-2 border-foreground/80 bg-lime/20 p-4">
+            <div className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
+              Scheduled dispatch (#117 deferral)
+            </div>
+            <div className="mt-1 text-sm">
+              {(() => {
+                const when = new Date(request.scheduled_dispatch_at);
+                const isPast = when.getTime() <= Date.now();
+                return (
+                  <>
+                    <span className="font-mono">{when.toISOString()}</span>{' '}
+                    <span className="text-muted-foreground">
+                      ({isPast ? 'past — cron should have dispatched by now' : 'future — waiting on cron'})
+                    </span>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        ) : null}
 
         {/* Intake JSON */}
         <section className="mt-10">
