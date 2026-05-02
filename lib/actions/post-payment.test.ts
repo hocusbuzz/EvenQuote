@@ -176,6 +176,51 @@ describe('sendPaymentMagicLink', () => {
     // gets &-encoded by escapeHtml so we look for the unique token
     // portion rather than the literal URL; text body is verbatim.
     expect(sendArgs.html).toContain('tok123');
+    expect(sendArgs.text).toContain('tok123');
+  });
+
+  it('rewrites the action_link host to evenquote.com/auth/verify when NEXT_PUBLIC_APP_URL is set (deliverability fix)', async () => {
+    // Locks the May 2026 deliverability fix: Resend Insights flagged
+    // the supabase.co host in the email as the #1 spam-trigger
+    // ("link URLs don't match sending domain"). We proxy through
+    // /auth/verify on our own domain so the user-visible link host
+    // matches the From domain. See app/auth/verify/route.ts.
+    process.env.NEXT_PUBLIC_APP_URL = 'https://evenquote.com';
+    mockHeaders();
+    mockSupabaseGenerate({
+      data: { properties: { action_link: FAKE_ACTION_LINK } },
+      error: null,
+    });
+    const send = mockResendSend({ ok: true, id: 'em_1', simulated: false });
+    const { sendPaymentMagicLink } = await import('./post-payment');
+
+    await sendPaymentMagicLink({ email: 'a@b.com', requestId: 'qr-1' });
+
+    const sendArgs = send.mock.calls[0][0];
+    // Text body has the proxied URL verbatim. Must point at our
+    // domain, NOT the bare supabase.co host.
+    expect(sendArgs.text).toContain('https://evenquote.com/auth/verify?');
+    expect(sendArgs.text).not.toContain('https://test.supabase.co/auth/v1/verify');
+    // Token + every original query param must survive the rewrite.
+    expect(sendArgs.text).toContain('tok123');
+    expect(sendArgs.text).toContain('type=magiclink');
+  });
+
+  it('falls back to raw action_link when NEXT_PUBLIC_APP_URL is unset (local dev)', async () => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    mockHeaders();
+    mockSupabaseGenerate({
+      data: { properties: { action_link: FAKE_ACTION_LINK } },
+      error: null,
+    });
+    const send = mockResendSend({ ok: true, id: 'em_1', simulated: false });
+    const { sendPaymentMagicLink } = await import('./post-payment');
+
+    await sendPaymentMagicLink({ email: 'a@b.com', requestId: 'qr-1' });
+
+    const sendArgs = send.mock.calls[0][0];
+    // No rewrite in dev — would point at localhost which doesn't
+    // serve /auth/verify, breaking the loopback flow.
     expect(sendArgs.text).toContain(FAKE_ACTION_LINK);
   });
 

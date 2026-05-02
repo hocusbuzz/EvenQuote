@@ -155,12 +155,46 @@ export async function sendPaymentMagicLink(input: SendMagicLinkInput): Promise<v
     throw wrapped;
   }
 
+  // ── Rewrite action_link to go through our /auth/verify proxy ──
+  //
+  // Supabase's generateLink returns:
+  //   https://<project>.supabase.co/auth/v1/verify?token=…&type=…&redirect_to=…
+  //
+  // The host (<project>.supabase.co) doesn't match our sending domain
+  // (evenquote.com). Resend's deliverability insights flag this as a
+  // top-tier spam signal: "Mismatched URLs can trigger spam filters."
+  // Hotmail/Outlook quarantine these aggressively.
+  //
+  // The Supabase Custom Domain feature (auth.evenquote.com) is the
+  // native fix but requires Pro plan ($25/mo). Cheaper equivalent:
+  // route the email link through evenquote.com/auth/verify, which
+  // 302-redirects to the real Supabase verify endpoint with identical
+  // query params (see app/auth/verify/route.ts for the proxy). User-
+  // visible link domain matches sending domain → no spam signal,
+  // no plan upgrade.
+  //
+  // We fall back to the raw action_link if NEXT_PUBLIC_APP_URL is
+  // unset (local dev that doesn't need the rewrite).
+  const proxiedActionLink = (() => {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+    if (!appUrl) return linkData.properties.action_link;
+    try {
+      const orig = new URL(linkData.properties.action_link);
+      return `${appUrl.replace(/\/$/, '')}/auth/verify${orig.search}`;
+    } catch {
+      // Defensive: if Supabase's response shape changes and the
+      // action_link isn't a valid URL, fall back to the raw value
+      // rather than break magic-link sends entirely.
+      return linkData.properties.action_link;
+    }
+  })();
+
   // 2. Send the email ourselves via Resend with our branded template.
   //    tag: 'magic-link' shows up in Resend's dashboard for filtering
   //    bounce / complaint stats by send type.
   const rendered = renderMagicLink({
     recipientName: input.recipientName ?? null,
-    actionLink: linkData.properties.action_link,
+    actionLink: proxiedActionLink,
     categoryName: input.categoryName ?? null,
   });
 
