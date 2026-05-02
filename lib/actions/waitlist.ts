@@ -17,6 +17,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { assertRateLimitFromHeaders } from '@/lib/security/rate-limit-auth';
 import { createLogger } from '@/lib/logger';
 import { EmailSchema, ZipSchema } from '@/lib/forms/moving-intake';
+import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
 
 const log = createLogger('joinWaitlist');
 
@@ -36,6 +37,14 @@ const WaitlistSchema = z.object({
 });
 
 export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
+  // Honeypot: same hidden-field bot trap used on the intake actions.
+  // Returns the same generic copy a real save-failure would so the
+  // bot can't iterate around it.
+  if (isHoneypotTripped(raw)) {
+    log.info('honeypot tripped — silently dropping', { lib: 'waitlist' });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
+  }
+
   // Rate limit: 5 signups per minute per IP. The endpoint returns "already
   // on list" silently on dup-insert, so a scraper can't distinguish new
   // signups from repeats — but we still don't want a firehose overwhelming

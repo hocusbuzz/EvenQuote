@@ -179,6 +179,17 @@ const newIp = (): string => {
   return `9.35.${Math.floor(ipCounter / 254) + 1}.${(ipCounter % 254) + 1}`;
 };
 
+// Per-iteration unique email so the per-EMAIL throttle (5/24h, added
+// May 2026 alongside honeypot) doesn't trip mid-loop and mask the
+// per-IP behavior these tests are locking. The IP throttle (10/min)
+// is still exercised because IP doesn't change within a sub-test.
+function withUniqueEmail<T extends Record<string, unknown>>(
+  payload: T,
+  i: number,
+): T {
+  return { ...payload, contact_email: `loopuser+${i}@example.com` };
+}
+
 describe('intake rate-limit boundary audit (R35)', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -197,9 +208,11 @@ describe('intake rate-limit boundary audit (R35)', () => {
     );
     const { submitMovingIntake } = await import('./intake');
 
-    // Burn the bucket with valid input.
+    // Burn the bucket with valid input. Each iteration uses a unique
+    // email so the per-email throttle (5/24h) doesn't trip first and
+    // mask the per-IP behavior we're locking here.
     for (let i = 0; i < 10; i++) {
-      const r = await submitMovingIntake(VALID_MOVING_INPUT);
+      const r = await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
       expect(r.ok).toBe(true);
     }
 
@@ -233,7 +246,7 @@ describe('intake rate-limit boundary audit (R35)', () => {
     const { submitCleaningIntake } = await import('./cleaning-intake');
 
     for (let i = 0; i < 10; i++) {
-      const r = await submitCleaningIntake(VALID_CLEANING_INPUT);
+      const r = await submitCleaningIntake(withUniqueEmail(VALID_CLEANING_INPUT, i));
       expect(r.ok).toBe(true);
     }
     const blocked = await submitCleaningIntake({ also: 'garbage' });
@@ -257,11 +270,15 @@ describe('intake rate-limit boundary audit (R35)', () => {
     );
     const { submitMovingIntake } = await import('./intake');
 
-    for (let i = 0; i < 10; i++) await submitMovingIntake(VALID_MOVING_INPUT);
+    for (let i = 0; i < 10; i++) {
+      await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
+    }
     expect(catSpy).toHaveBeenCalledTimes(10);
 
-    // The blocked attempt must NOT increment the catSpy count.
-    await submitMovingIntake(VALID_MOVING_INPUT);
+    // The blocked attempt must NOT increment the catSpy count. Use
+    // a fresh email so this 11th call hits the per-IP limit, not
+    // the per-email limit (which we're not testing here).
+    await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, 99));
     expect(catSpy).toHaveBeenCalledTimes(10);
     expect(insertSpy).toHaveBeenCalledTimes(10);
   });
@@ -276,10 +293,12 @@ describe('intake rate-limit boundary audit (R35)', () => {
     );
     const { submitCleaningIntake } = await import('./cleaning-intake');
 
-    for (let i = 0; i < 10; i++) await submitCleaningIntake(VALID_CLEANING_INPUT);
+    for (let i = 0; i < 10; i++) {
+      await submitCleaningIntake(withUniqueEmail(VALID_CLEANING_INPUT, i));
+    }
     expect(catSpy).toHaveBeenCalledTimes(10);
 
-    await submitCleaningIntake(VALID_CLEANING_INPUT);
+    await submitCleaningIntake(withUniqueEmail(VALID_CLEANING_INPUT, 99));
     expect(catSpy).toHaveBeenCalledTimes(10);
     expect(insertSpy).toHaveBeenCalledTimes(10);
   });
@@ -311,14 +330,21 @@ describe('intake rate-limit boundary audit (R35)', () => {
     );
     const { submitMovingIntake } = await import('./intake');
 
-    // Burn IP A's bucket.
-    for (let i = 0; i < 11; i++) await submitMovingIntake(VALID_MOVING_INPUT);
-    const blockedA = await submitMovingIntake(VALID_MOVING_INPUT);
+    // Burn IP A's bucket. Unique email per iter so per-email
+    // throttle (5/24h) doesn't mask the per-IP behavior.
+    for (let i = 0; i < 11; i++) {
+      await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
+    }
+    const blockedA = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 100),
+    );
     expect(blockedA.ok).toBe(false);
 
     // Switch to IP B in-place (NO module reset — same buckets Map).
     currentXff = ipB;
-    const okB = await submitMovingIntake(VALID_MOVING_INPUT);
+    const okB = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 200),
+    );
     expect(okB.ok).toBe(true);
   });
 
@@ -346,13 +372,22 @@ describe('intake rate-limit boundary audit (R35)', () => {
     const { submitMovingIntake } = await import('./intake');
     const { submitCleaningIntake } = await import('./cleaning-intake');
 
-    // Burn moving's bucket.
-    for (let i = 0; i < 11; i++) await submitMovingIntake(VALID_MOVING_INPUT);
-    const blockedM = await submitMovingIntake(VALID_MOVING_INPUT);
+    // Burn moving's bucket. Unique email per iter to isolate per-IP
+    // behavior from the per-email throttle.
+    for (let i = 0; i < 11; i++) {
+      await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
+    }
+    const blockedM = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 100),
+    );
     expect(blockedM.ok).toBe(false);
 
-    // Same IP, cleaning vertical — fresh bucket.
-    const okC = await submitCleaningIntake(VALID_CLEANING_INPUT);
+    // Same IP, cleaning vertical — fresh bucket. Use yet another
+    // unique email to avoid the per-email throttle inheriting state
+    // from the moving submissions above.
+    const okC = await submitCleaningIntake(
+      withUniqueEmail(VALID_CLEANING_INPUT, 200),
+    );
     expect(okC.ok).toBe(true);
   });
 
@@ -378,17 +413,24 @@ describe('intake rate-limit boundary audit (R35)', () => {
     );
     const { submitMovingIntake } = await import('./intake');
 
-    // Burn the realClient bucket via a multi-hop XFF.
-    for (let i = 0; i < 11; i++) await submitMovingIntake(VALID_MOVING_INPUT);
+    // Burn the realClient bucket via a multi-hop XFF. Unique email
+    // per iter so the per-email throttle doesn't interfere.
+    for (let i = 0; i < 11; i++) {
+      await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
+    }
 
     // Same leftmost IP, different proxy chain — must still be blocked.
     currentXff = `${realClient}, 10.99.99.1, 10.99.99.2`;
-    const stillBlocked = await submitMovingIntake(VALID_MOVING_INPUT);
+    const stillBlocked = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 100),
+    );
     expect(stillBlocked.ok).toBe(false);
 
     // Different leftmost IP — fresh bucket.
     currentXff = `${otherClient}, ${proxy1}, ${proxy2}`;
-    const fresh = await submitMovingIntake(VALID_MOVING_INPUT);
+    const fresh = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 200),
+    );
     expect(fresh.ok).toBe(true);
   });
 
@@ -411,7 +453,9 @@ describe('intake rate-limit boundary audit (R35)', () => {
     // lib/rate-limit.ts#clientKeyFromHeaders fallback.
     let blockedCount = 0;
     for (let i = 0; i < 11; i++) {
-      const r = await submitMovingIntake(VALID_MOVING_INPUT);
+      // Unique email per iter so the per-email throttle doesn't fire
+      // before the per-IP "unknown" bucket gets a chance to fill.
+      const r = await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
       if (!r.ok && /too many requests/i.test(r.error)) blockedCount += 1;
     }
     expect(blockedCount).toBeGreaterThanOrEqual(1);
@@ -426,12 +470,15 @@ describe('intake rate-limit boundary audit (R35)', () => {
       { data: { id: 'qr-x' }, error: null },
     );
     const { submitMovingIntake } = await import('./intake');
-    // Burn the bucket via x-real-ip.
+    // Burn the bucket via x-real-ip. Unique email per iter to keep
+    // the per-email throttle out of the per-IP locking we're doing.
     for (let i = 0; i < 10; i++) {
-      const r = await submitMovingIntake(VALID_MOVING_INPUT);
+      const r = await submitMovingIntake(withUniqueEmail(VALID_MOVING_INPUT, i));
       expect(r.ok).toBe(true);
     }
-    const blocked = await submitMovingIntake(VALID_MOVING_INPUT);
+    const blocked = await submitMovingIntake(
+      withUniqueEmail(VALID_MOVING_INPUT, 100),
+    );
     expect(blocked.ok).toBe(false);
   });
 

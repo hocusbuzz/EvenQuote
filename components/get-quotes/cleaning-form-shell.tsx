@@ -18,6 +18,8 @@ import { STEP_COMPONENTS } from './cleaning-steps';
 import { IntakeProgress } from './progress';
 import { submitCleaningIntake } from '@/lib/actions/cleaning-intake';
 import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
+import { HoneypotInput } from '@/components/security/honeypot-input';
+import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
 
 export function CleaningFormShell() {
   const hydrated = useIsCleaningHydrated();
@@ -30,6 +32,8 @@ export function CleaningFormShell() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  // See form-shell.tsx (moving) for the honeypot rationale.
+  const [honeypot, setHoneypot] = useState('');
   const router = useRouter();
 
   const currentIndex = STEPS.findIndex((s) => s.id === currentStep);
@@ -51,8 +55,13 @@ export function CleaningFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      // See form-shell.tsx for rationale on merging UTMs at submit time.
-      const result = await submitCleaningIntake({ ...draft, ...utms });
+      // See form-shell.tsx for rationale on merging UTMs + honeypot
+      // into the submit payload.
+      const result = await submitCleaningIntake({
+        ...draft,
+        ...utms,
+        [HONEYPOT_FIELD_NAME]: honeypot,
+      });
       if (!result.ok) {
         setSubmitError(result.error);
         if (result.fieldErrors) {
@@ -115,6 +124,9 @@ export function CleaningFormShell() {
         onSubmit={handleSubmit}
         submitting={isPending}
       />
+
+      {/* Honeypot — see form-shell.tsx (moving). */}
+      <HoneypotInput value={honeypot} onChange={setHoneypot} />
     </>
   );
 }

@@ -25,6 +25,7 @@ import {
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
 
@@ -40,7 +41,17 @@ export type SubmitResult =
   | { ok: false; error: string; fieldErrors?: Record<string, string> };
 
 export async function submitJunkRemovalIntake(raw: unknown): Promise<SubmitResult> {
-  // 0. Rate limit parity — 10/min/IP, separate bucket from other verticals
+  // 0a. Honeypot — see lib/security/honeypot.ts + intake.ts (moving)
+  // for the rationale. Same generic error so bots can't detect the trip.
+  if (isHoneypotTripped(raw)) {
+    log.info('honeypot tripped — silently dropping', {
+      lib: 'intake',
+      vertical: 'junk-removal',
+    });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
+  }
+
+  // 0b. Rate limit parity — 10/min/IP, separate bucket from other verticals
   // (see intake-rate-limit-audit.test.ts).
   const rl = rateLimit(clientKeyFromHeaders(headers(), 'intake:junk-removal'), {
     limit: 10,
@@ -69,6 +80,17 @@ export async function submitJunkRemovalIntake(raw: unknown): Promise<SubmitResul
   }
 
   const data: JunkRemovalIntakeData = parsed.data;
+
+  // 1b. Per-email throttle — see intake.ts (moving) for the rationale.
+  const emailKey = `intake:email:${data.contact_email.toLowerCase()}`;
+  const emailRl = rateLimit(emailKey, { limit: 5, windowMs: 24 * 60 * 60 * 1000 });
+  if (!emailRl.ok) {
+    log.info('per-email throttle tripped', { lib: 'intake', vertical: 'junk-removal' });
+    return {
+      ok: false,
+      error: `Too many requests for this email. Try again in ${Math.ceil(emailRl.retryAfterSec / 3600)}h.`,
+    };
+  }
 
   // 2. Get category id
   const admin = createAdminClient();

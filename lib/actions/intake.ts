@@ -31,6 +31,7 @@ import { getUser } from '@/lib/auth';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
+import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
 
 const log = createLogger('submitMovingIntake');
 
@@ -62,7 +63,20 @@ export type SubmitResult =
   | { ok: false; error: string; fieldErrors?: Record<string, string> };
 
 export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
-  // 0. Rate limit: 10 intake submissions per minute per IP. Higher than
+  // 0a. Honeypot: a hidden form field a human never sees but naive
+  // form-fill bots populate. Checked BEFORE rate limit + validation so
+  // bots cost us essentially nothing. Returns the same generic error
+  // a real save-failure would, so the bot can't iterate around it.
+  // See lib/security/honeypot.ts for the full design rationale.
+  if (isHoneypotTripped(raw)) {
+    log.info('honeypot tripped — silently dropping', {
+      lib: 'intake',
+      vertical: 'moving',
+    });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
+  }
+
+  // 0b. Rate limit: 10 intake submissions per minute per IP. Higher than
   // the waitlist because a real user often submits once per device and
   // rarely more, but the intake form has multiple steps so a single
   // hesitant user might retry a couple times. Anything past 10 is bot-shaped.
@@ -93,6 +107,29 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
   }
 
   const data: MovingIntakeData = parsed.data;
+
+  // 1b. Per-email throttle. Layered on top of the per-IP limiter
+  // above. Rationale:
+  //   • Per-IP catches naive flooding from one source.
+  //   • Per-email catches abuse where an attacker rotates through
+  //     IPs (proxies, mobile networks) but reuses the same target
+  //     email — common for harassment / griefing patterns ("sign
+  //     this person up for everything").
+  //   • 5 per 24h per email is generous for legitimate use (a
+  //     customer who fat-fingers + retries 4 times is fine) but
+  //     stops the obvious abuse case dead.
+  // Applied AFTER Zod parse because we need the validated email.
+  // Same generic error shape as the per-IP limiter so a bot can't
+  // infer which limiter tripped.
+  const emailKey = `intake:email:${data.contact_email.toLowerCase()}`;
+  const emailRl = rateLimit(emailKey, { limit: 5, windowMs: 24 * 60 * 60 * 1000 });
+  if (!emailRl.ok) {
+    log.info('per-email throttle tripped', { lib: 'intake', vertical: 'moving' });
+    return {
+      ok: false,
+      error: `Too many requests for this email. Try again in ${Math.ceil(emailRl.retryAfterSec / 3600)}h.`,
+    };
+  }
 
   // 2. Get category id
   const admin = createAdminClient();

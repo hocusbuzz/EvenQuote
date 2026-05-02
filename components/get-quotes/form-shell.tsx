@@ -21,6 +21,8 @@ import { STEP_COMPONENTS } from './steps';
 import { IntakeProgress } from './progress';
 import { submitMovingIntake } from '@/lib/actions/intake';
 import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
+import { HoneypotInput } from '@/components/security/honeypot-input';
+import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
 
 export function IntakeFormShell() {
   const hydrated = useIsHydrated();
@@ -36,6 +38,10 @@ export function IntakeFormShell() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  // Honeypot value — humans never touch this; bots that fill every
+  // input populate it. See lib/security/honeypot.ts. Kept in local
+  // useState (not Zustand) so it never persists to localStorage.
+  const [honeypot, setHoneypot] = useState('');
   const router = useRouter();
 
   // ─── Step navigation ────────────────────────────────────────
@@ -60,11 +66,17 @@ export function IntakeFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      // Merge captured UTMs into the payload right at submit time.
-      // The intake server action validates these as optional via the
-      // shared UtmsSchema (merged into MovingIntakeSchema) and persists
-      // them into the utm_* columns added by migration 0015.
-      const result = await submitMovingIntake({ ...draft, ...utms });
+      // Merge captured UTMs + honeypot into the payload right at submit
+      // time. The intake server action validates UTMs as optional via
+      // the shared UtmsSchema (merged into MovingIntakeSchema) and
+      // persists them into the utm_* columns added by migration 0015.
+      // The honeypot field is checked + stripped at the action boundary
+      // (Zod strips unknown keys by default).
+      const result = await submitMovingIntake({
+        ...draft,
+        ...utms,
+        [HONEYPOT_FIELD_NAME]: honeypot,
+      });
       if (!result.ok) {
         setSubmitError(result.error);
         // If server validation caught something, jump to the most
@@ -126,6 +138,9 @@ export function IntakeFormShell() {
         onSubmit={handleSubmit}
         submitting={isPending}
       />
+
+      {/* Honeypot — invisible to humans, harvested by naive bots. */}
+      <HoneypotInput value={honeypot} onChange={setHoneypot} />
     </>
   );
 }

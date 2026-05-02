@@ -19,6 +19,8 @@ import { STEP_COMPONENTS } from './handyman-steps';
 import { IntakeProgress } from './progress';
 import { submitHandymanIntake } from '@/lib/actions/handyman-intake';
 import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
+import { HoneypotInput } from '@/components/security/honeypot-input';
+import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
 
 export function HandymanFormShell() {
   const hydrated = useIsHandymanHydrated();
@@ -31,6 +33,8 @@ export function HandymanFormShell() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  // See form-shell.tsx (moving) for the honeypot rationale.
+  const [honeypot, setHoneypot] = useState('');
   const router = useRouter();
 
   const currentIndex = STEPS.findIndex((s) => s.id === currentStep);
@@ -52,8 +56,12 @@ export function HandymanFormShell() {
   const handleSubmit = () => {
     setSubmitError(null);
     startTransition(async () => {
-      // See form-shell.tsx for rationale on merging UTMs at submit time.
-      const result = await submitHandymanIntake({ ...draft, ...utms });
+      // See form-shell.tsx for rationale on merging UTMs + honeypot.
+      const result = await submitHandymanIntake({
+        ...draft,
+        ...utms,
+        [HONEYPOT_FIELD_NAME]: honeypot,
+      });
       if (!result.ok) {
         setSubmitError(result.error);
         if (result.fieldErrors) {
@@ -110,6 +118,9 @@ export function HandymanFormShell() {
         onSubmit={handleSubmit}
         submitting={isPending}
       />
+
+      {/* Honeypot — see form-shell.tsx (moving). */}
+      <HoneypotInput value={honeypot} onChange={setHoneypot} />
     </>
   );
 }

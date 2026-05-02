@@ -12,6 +12,8 @@ import { joinWaitlist } from '@/lib/actions/waitlist';
 import { FormField } from './form-field';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { HoneypotInput } from '@/components/security/honeypot-input';
+import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
 
 type Props = {
   categorySlug: string;
@@ -27,6 +29,7 @@ export function WaitlistCapture({
 }: Props) {
   const [email, setEmail] = useState('');
   const [zip, setZip] = useState('');
+  const [honeypot, setHoneypot] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ alreadyOnList: boolean } | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -39,6 +42,7 @@ export function WaitlistCapture({
         categorySlug,
         email,
         zipCode: zip || undefined,
+        [HONEYPOT_FIELD_NAME]: honeypot,
       });
       if (!result.ok) {
         setError(result.error);
@@ -109,6 +113,9 @@ export function WaitlistCapture({
             {error}
           </div>
         ) : null}
+
+        {/* Honeypot — see lib/security/honeypot.ts. */}
+        <HoneypotInput value={honeypot} onChange={setHoneypot} />
 
         <Button type="submit" variant="lime" disabled={isPending} className="w-full sm:w-auto">
           {isPending ? 'Adding you…' : 'Notify me when it\'s live'}
