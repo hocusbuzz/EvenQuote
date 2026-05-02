@@ -20,6 +20,9 @@ import { SiteNavbar } from '@/components/site/navbar';
 import { ArchiveButton } from '@/components/admin/archive-button';
 import { RetryUnreachedButton } from '@/components/admin/retry-unreached-button';
 import { RerunExtractorButton } from '@/components/admin/rerun-extractor-button';
+import { RefundNowButton } from '@/components/admin/refund-now-button';
+import { MarkFailedButton } from '@/components/admin/mark-failed-button';
+import { ResendReportButton } from '@/components/admin/resend-report-button';
 
 export const metadata: Metadata = {
   title: 'Request · Admin',
@@ -206,6 +209,22 @@ export default async function AdminRequestDetailPage({
               </div>
             )}
           </Box>
+        </div>
+
+        {/* Ops action bar — one-click recovery primitives. All idempotent
+            (Stripe via shared idempotency key, status flips to same value
+            are no-ops, resend explicitly does NOT dedupe — that's the
+            operator's intent). Confirm dialogs on destructive actions
+            (refund, mark failed, resend) live in the button components. */}
+        <div className="mt-6 rounded-md border-2 border-foreground/30 bg-foreground/[0.02] p-3">
+          <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            Ops actions
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <RefundNowButton requestId={request.id} />
+            <MarkFailedButton requestId={request.id} />
+            <ResendReportButton requestId={request.id} />
+          </div>
         </div>
 
         {/* Deferred-dispatch indicator (#117). When status='paid' but

@@ -12,6 +12,18 @@ import { requireAdmin } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runAdditionalBatch } from '@/lib/calls/engine';
 import { extractQuoteFromCall } from '@/lib/calls/extract-quote';
+import { getStripe } from '@/lib/stripe/server';
+import { sendEmail } from '@/lib/email/resend';
+import {
+  renderQuoteReport,
+  type QuoteForReport,
+  type RefundOutcome,
+} from '@/lib/email/templates';
+import {
+  resolveRecipient,
+  buildCoverageSummary,
+  buildDashboardUrl,
+} from '@/lib/cron/send-reports';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
 
@@ -31,7 +43,14 @@ export type AdminReason =
   | 'archiveUpdateFailed'
   | 'bulkArchiveFailed'
   | 'retryUnreachedFailed'
-  | 'rerunExtractorFailed';
+  | 'rerunExtractorFailed'
+  | 'refundLookupFailed'
+  | 'refundCreateFailed'
+  | 'refundStatusUpdateFailed'
+  | 'markFailedUpdateFailed'
+  | 'resendLookupFailed'
+  | 'resendQuotesLoadFailed'
+  | 'resendSendFailed';
 
 export type AdminActionResult =
   | { ok: true; note?: string }
@@ -366,4 +385,417 @@ export async function rerunExtractor(
     if (reasons[0]) noteParts.push(`First reason: ${reasons[0]}`);
   }
   return { ok: true, note: noteParts.join(' ') };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// One-click ops actions (Tier 1 backlog #2)
+//
+// Three operator buttons on /admin/requests/[id] for cutting customer-
+// failure recovery time from "20 min of SQL + cron-tick waiting" down
+// to "1 min of clicking." Each is idempotent so a double-click can't
+// double-act on Stripe / status / email.
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Refund this request's $9.99 payment immediately, regardless of its
+ * status. Useful when:
+ *   • Customer asked for a refund directly (pre-empting the cron path).
+ *   • The request is parked in 'paid' or 'calling' with no quotes
+ *     coming and ops decides to escape the customer rather than wait
+ *     for send-reports' refund logic to catch up.
+ *   • A test request needs to be refunded by hand.
+ *
+ * Idempotent on Stripe's side via the same `refund-zero-quotes-<paymentId>`
+ * key the cron uses — if a refund was already issued by either path,
+ * Stripe returns the existing refund instead of creating a duplicate.
+ * Same key means the cron and the admin button cooperate cleanly.
+ *
+ * Side effects:
+ *   • payments.status := 'refunded'
+ *   • quote_requests.report_data.refund_outcome := 'issued' (merged
+ *     into existing report_data so prior fields stay)
+ *   • Sentry capture on Stripe / DB failure (with payment id tag).
+ *
+ * Does NOT change quote_requests.status or send any emails — the
+ * caller decides whether to also markFailed() / resendReportEmail().
+ */
+export async function refundRequestNow(
+  requestId: string
+): Promise<AdminActionResult> {
+  const adminUser = await requireAdmin();
+  if (!requestId) return { ok: false, error: 'missing requestId' };
+
+  const adminDb = createAdminClient();
+
+  // 1. Look up the payments row.
+  const { data: pay, error: payErr } = await adminDb
+    .from('payments')
+    .select('id, stripe_payment_intent_id, status')
+    .eq('quote_request_id', requestId)
+    .maybeSingle();
+
+  if (payErr) {
+    log.error('refundRequestNow: payments lookup failed', {
+      requestId,
+      err: payErr,
+    });
+    captureException(new Error('payments lookup failed'), {
+      tags: {
+        lib: 'admin',
+        reason: 'refundLookupFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: payErr.message };
+  }
+  if (!pay) {
+    return {
+      ok: false,
+      error: 'No payments row for this request — nothing to refund.',
+    };
+  }
+
+  // Already refunded — idempotent return. Make the operator note
+  // explicit so a double-click on the button reads as "yep, done."
+  if (pay.status === 'refunded') {
+    return { ok: true, note: 'Already refunded — no-op.' };
+  }
+
+  if (!pay.stripe_payment_intent_id) {
+    return {
+      ok: false,
+      error:
+        'Payments row is missing stripe_payment_intent_id — refund must be issued manually in the Stripe dashboard.',
+    };
+  }
+
+  // 2. Issue refund. Same idempotency key shape as the cron path so
+  // both routes converge on a single Stripe refund object.
+  try {
+    const stripe = getStripe();
+    await stripe.refunds.create(
+      {
+        payment_intent: pay.stripe_payment_intent_id,
+        reason: 'requested_by_customer',
+        metadata: {
+          quote_request_id: requestId,
+          payment_row_id: pay.id,
+          // Distinguishes admin-initiated from cron-initiated refunds
+          // in Stripe metadata. Stripe preserves whichever metadata
+          // came in with the FIRST create call (idempotency); a later
+          // run with a different `source` is silently ignored. So if
+          // the cron has already refunded, the metadata will say
+          // 'cron/send-reports/zero-quotes' and that's correct — the
+          // cron actually did the work.
+          source: 'admin/refund-button',
+          // Audit trail — the admin user id of who clicked the button.
+          // Sentry tags don't carry actor (PII boundary), so this is
+          // the only place actor lands in the system of record.
+          actor_user_id: adminUser.id,
+        },
+      },
+      {
+        idempotencyKey: `refund-zero-quotes-${pay.id}`,
+      }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error('refundRequestNow: stripe.refunds.create failed', {
+      requestId,
+      paymentId: pay.id,
+      err: msg,
+    });
+    captureException(err, {
+      tags: {
+        lib: 'admin',
+        reason: 'refundCreateFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: `Stripe refund failed: ${msg}` };
+  }
+
+  // 3. Mark payments row. Failure here is a book-keeping issue (Stripe
+  // has the money back, our DB doesn't reflect it). Capture so ops can
+  // reconcile, but don't return error — the customer-facing outcome
+  // (the refund) IS done.
+  const { error: updErr } = await adminDb
+    .from('payments')
+    .update({ status: 'refunded' })
+    .eq('id', pay.id);
+  if (updErr) {
+    log.error('refundRequestNow: payments status update failed AFTER refund', {
+      requestId,
+      paymentId: pay.id,
+      err: updErr,
+    });
+    captureException(new Error(updErr.message), {
+      tags: {
+        lib: 'admin',
+        reason: 'refundStatusUpdateFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    // Still report success — refund happened.
+  }
+
+  // 4. Stamp report_data.refund_outcome so anyone reading the request
+  // later sees the refund recorded. Merge into existing report_data
+  // (don't clobber generated_at, payload_snapshot, etc.).
+  const { data: qr } = await adminDb
+    .from('quote_requests')
+    .select('report_data')
+    .eq('id', requestId)
+    .maybeSingle();
+  const existing =
+    (qr?.report_data as Record<string, unknown> | null | undefined) ?? {};
+  await adminDb
+    .from('quote_requests')
+    .update({
+      report_data: {
+        ...existing,
+        refund_outcome: 'issued' satisfies RefundOutcome,
+        refund_issued_by_admin_at: new Date().toISOString(),
+      },
+    })
+    .eq('id', requestId);
+
+  revalidatePath(`/admin/requests/${requestId}`);
+  revalidatePath('/admin');
+
+  return {
+    ok: true,
+    note: `Refund issued for $${pay.id ? '9.99' : '?'} (payment ${pay.id.slice(0, 8)}…).`,
+  };
+}
+
+/**
+ * Force a request to status='failed'. Used when a request is hung
+ * mid-pipeline and needs to be handed off to send-reports' refund-and-
+ * notify path. The cron's filter (`status in ('processing','completed')`)
+ * doesn't pick up 'failed' rows, so the operator should usually pair
+ * this with refundRequestNow() — markFailed alone just changes a label.
+ *
+ * Idempotent — flipping an already-'failed' row to 'failed' is a no-op
+ * insert/update with the same value.
+ */
+export async function markFailed(
+  requestId: string
+): Promise<AdminActionResult> {
+  await requireAdmin();
+  if (!requestId) return { ok: false, error: 'missing requestId' };
+
+  const adminDb = createAdminClient();
+  const { data, error } = await adminDb
+    .from('quote_requests')
+    .update({ status: 'failed' })
+    .eq('id', requestId)
+    .select('id, status')
+    .maybeSingle();
+
+  if (error) {
+    log.error('markFailed: update failed', { requestId, err: error });
+    captureException(new Error(error.message), {
+      tags: {
+        lib: 'admin',
+        reason: 'markFailedUpdateFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: error.message };
+  }
+  if (!data) {
+    return { ok: false, error: 'No quote_request matched that id.' };
+  }
+
+  revalidatePath(`/admin/requests/${requestId}`);
+  revalidatePath('/admin');
+  revalidatePath('/admin/requests');
+
+  return { ok: true, note: `Status flipped to 'failed'.` };
+}
+
+/**
+ * Re-render the quote report email from CURRENT DB state and send it
+ * again. Used when a customer says they didn't get the original email
+ * (spam folder, deleted, lost).
+ *
+ * Why "from current DB state" not "from saved report_data": if the
+ * operator has since clicked rerun-extractor and new quotes landed,
+ * those should be in the resent email. The whole point of resending
+ * is to give the customer the latest.
+ *
+ * Side effects:
+ *   • Sends an email via Resend (one extra send to your provider quota).
+ *   • Stamps quote_requests.report_data.last_resent_at so we have a
+ *     trail of how often this fired.
+ *   • Does NOT touch report_sent_at, status, or anything else in row
+ *     state — admin-initiated resend is purely additive.
+ *
+ * Idempotency note: this DOES send each time it's clicked. Click 5
+ * times → 5 emails. The button has a confirm dialog as the human
+ * guard. We deliberately don't dedupe in the action itself because
+ * "send another copy" IS the operator's intent.
+ */
+export async function resendReportEmail(
+  requestId: string
+): Promise<AdminActionResult> {
+  await requireAdmin();
+  if (!requestId) return { ok: false, error: 'missing requestId' };
+
+  const adminDb = createAdminClient();
+
+  // 1. Pull the request + category in one round-trip (mirror what the
+  // cron's scan query selects).
+  const { data: row, error: lookupErr } = await adminDb
+    .from('quote_requests')
+    .select(
+      `id, user_id, city, state, intake_data, report_data,
+       total_businesses_to_call, total_calls_completed, total_quotes_collected,
+       service_categories:category_id ( name, slug )`
+    )
+    .eq('id', requestId)
+    .maybeSingle();
+
+  if (lookupErr) {
+    log.error('resendReportEmail: request lookup failed', {
+      requestId,
+      err: lookupErr,
+    });
+    captureException(new Error(lookupErr.message), {
+      tags: {
+        lib: 'admin',
+        reason: 'resendLookupFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: lookupErr.message };
+  }
+  if (!row) {
+    return { ok: false, error: 'No quote_request matched that id.' };
+  }
+
+  const sc = Array.isArray(row.service_categories)
+    ? row.service_categories[0]
+    : row.service_categories;
+
+  // 2. Resolve recipient. resolveRecipient handles user_id → profile
+  // OR intake.contact_email fallback.
+  const recipient = await resolveRecipient(adminDb, {
+    userId: row.user_id,
+    intakeData: row.intake_data as Record<string, unknown> | null,
+  });
+  if (!recipient) {
+    return {
+      ok: false,
+      error: 'No recipient email available (no profile email, no intake.contact_email).',
+    };
+  }
+
+  // 3. Pull quotes — same select as send-reports, kept in lockstep.
+  const { data: quoteRows, error: qErr } = await adminDb
+    .from('quotes')
+    .select(
+      `id, business_id, price_min, price_max, price_description, availability,
+       includes, excludes, notes, requires_onsite_estimate,
+       business:businesses!quotes_business_id_fkey(name)`
+    )
+    .eq('quote_request_id', requestId)
+    .order('price_min', { ascending: true, nullsFirst: false });
+
+  if (qErr) {
+    log.error('resendReportEmail: quotes load failed', { requestId, err: qErr });
+    captureException(new Error(qErr.message), {
+      tags: {
+        lib: 'admin',
+        reason: 'resendQuotesLoadFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: qErr.message };
+  }
+
+  const quotes: QuoteForReport[] = (quoteRows ?? []).map((q) => {
+    const bizRaw = (q as { business?: unknown }).business;
+    const business = Array.isArray(bizRaw) ? bizRaw[0] : bizRaw;
+    return {
+      businessName: (business as { name?: string } | null)?.name ?? 'Local pro',
+      priceMin: q.price_min,
+      priceMax: q.price_max,
+      priceDescription: q.price_description,
+      availability: q.availability,
+      includes: q.includes,
+      excludes: q.excludes,
+      notes: q.notes,
+      requiresOnsiteEstimate: q.requires_onsite_estimate,
+    };
+  });
+
+  // 4. Reuse the prior refund_outcome from saved report_data. If the
+  // original send was zero-quotes-with-refund, the resend should
+  // continue saying "refund issued" — not silently flip to "your
+  // quotes are ready" because a quote landed via rerun-extractor
+  // after the refund. Falling back to 'not_applicable' if absent.
+  const reportData =
+    (row.report_data as Record<string, unknown> | null | undefined) ?? {};
+  const priorRefund = reportData['refund_outcome'];
+  const refundOutcome: RefundOutcome =
+    priorRefund === 'issued' || priorRefund === 'pending_support'
+      ? priorRefund
+      : 'not_applicable';
+
+  const rendered = renderQuoteReport({
+    recipientName: recipient.name,
+    categoryName: sc?.name ?? 'service',
+    city: row.city,
+    state: row.state,
+    coverageSummary: buildCoverageSummary({
+      totalCallsCompleted: row.total_calls_completed,
+      totalBusinessesToCall: row.total_businesses_to_call,
+      totalQuotesCollected: row.total_quotes_collected,
+    }),
+    dashboardUrl: buildDashboardUrl(row.id),
+    refundOutcome,
+    quotes,
+  });
+
+  // 5. Send. Tag distinguishes resends from cron-original sends in
+  // Resend's analytics.
+  const send = await sendEmail({
+    to: recipient.email,
+    subject: rendered.subject,
+    html: rendered.html,
+    text: rendered.text,
+    tag: 'quote-report-resend',
+  });
+  if (!send.ok) {
+    log.error('resendReportEmail: send failed', { requestId, err: send.error });
+    captureException(new Error(send.error), {
+      tags: {
+        lib: 'admin',
+        reason: 'resendSendFailed' satisfies AdminReason,
+        requestId,
+      },
+    });
+    return { ok: false, error: `Email send failed: ${send.error}` };
+  }
+
+  // 6. Stamp last_resent_at so the row carries the audit. Best-effort —
+  // the email already went out so we don't fail the action on this.
+  await adminDb
+    .from('quote_requests')
+    .update({
+      report_data: {
+        ...reportData,
+        last_resent_at: new Date().toISOString(),
+      },
+    })
+    .eq('id', requestId);
+
+  revalidatePath(`/admin/requests/${requestId}`);
+
+  return {
+    ok: true,
+    note: `Sent to ${recipient.email} (${quotes.length} quote${quotes.length === 1 ? '' : 's'}).`,
+  };
 }

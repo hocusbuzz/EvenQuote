@@ -95,6 +95,31 @@ const FIXTURES: ActionFixture[] = [
     resultTypeName: 'AdminActionResult',
   },
   {
+    // Tier 1 backlog #2 (one-click ops): immediate Stripe refund.
+    // Idempotent via shared key with the cron path.
+    file: 'admin.ts',
+    fn: 'refundRequestNow',
+    convention: 'ok-union',
+    resultTypeName: 'AdminActionResult',
+  },
+  {
+    // Tier 1 backlog #2: force status='failed' (handoff to send-reports
+    // refund-and-notify path).
+    file: 'admin.ts',
+    fn: 'markFailed',
+    convention: 'ok-union',
+    resultTypeName: 'AdminActionResult',
+  },
+  {
+    // Tier 1 backlog #2: re-render report email from current DB state
+    // and resend. Each click = one extra email (no dedupe — operator
+    // intent).
+    file: 'admin.ts',
+    fn: 'resendReportEmail',
+    convention: 'ok-union',
+    resultTypeName: 'AdminActionResult',
+  },
+  {
     file: 'auth.ts',
     fn: 'signInWithMagicLink',
     convention: 'error-union',
@@ -124,8 +149,26 @@ const FIXTURES: ActionFixture[] = [
     resultTypeName: 'SubmitResult',
   },
   {
+    file: 'handyman-intake.ts',
+    fn: 'submitHandymanIntake',
+    convention: 'ok-union',
+    resultTypeName: 'SubmitResult',
+  },
+  {
     file: 'intake.ts',
     fn: 'submitMovingIntake',
+    convention: 'ok-union',
+    resultTypeName: 'SubmitResult',
+  },
+  {
+    file: 'junk-removal-intake.ts',
+    fn: 'submitJunkRemovalIntake',
+    convention: 'ok-union',
+    resultTypeName: 'SubmitResult',
+  },
+  {
+    file: 'lawn-care-intake.ts',
+    fn: 'submitLawnCareIntake',
     convention: 'ok-union',
     resultTypeName: 'SubmitResult',
   },
@@ -243,14 +286,18 @@ describe('server-action return convention audit (R37g)', () => {
   }
 
   // ── Fixture completeness lock ────────────────────────────────────
-  it('fixture count is exactly 11 (catch new actions added without convention)', () => {
+  it('fixture count tripwire (catch new actions added without convention)', () => {
     // Any new action in lib/actions/ must land in FIXTURES with an
     // explicit convention. A new file or a new exported async fn
     // without fixture coverage makes this count wrong.
     // R44(d): bumped 10 → 11 after cataloging admin.ts:retryUnreachedBusinesses.
     // R47.1: bumped 11 → 12 after cataloging admin.ts:rerunExtractor.
     // R47.2: bumped 12 → 13 after cataloging admin.ts:bulkArchive.
-    expect(FIXTURES.length).toBe(13);
+    // 2026-05-02: bumped 13 → 19 after cataloging the 3 new vertical
+    // intakes (handyman, lawn-care, junk-removal — added in prior
+    // commits but never catalogued) AND the 3 Tier 1 backlog #2
+    // ops actions (refundRequestNow, markFailed, resendReportEmail).
+    expect(FIXTURES.length).toBe(19);
   });
 
   it('every exported async function under lib/actions/ is catalogued in FIXTURES', () => {

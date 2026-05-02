@@ -211,7 +211,10 @@ async function processOne(
 > {
   // 1. Resolve recipient email. Prefer the authed user's profile, fall
   // back to whatever the guest entered at intake.
-  const recipient = await resolveRecipient(admin, request);
+  const recipient = await resolveRecipient(admin, {
+    userId: request.user_id,
+    intakeData: request.intake_data,
+  });
   if (!recipient) {
     return { status: 'skipped', reason: 'no recipient email' };
   }
@@ -258,7 +261,11 @@ async function processOne(
 
   // 4. Compose the email.
   const categoryName = request.category?.name ?? 'service';
-  const coverageSummary = buildCoverageSummary(request);
+  const coverageSummary = buildCoverageSummary({
+    totalCallsCompleted: request.total_calls_completed,
+    totalBusinessesToCall: request.total_businesses_to_call,
+    totalQuotesCollected: request.total_quotes_collected,
+  });
   const dashboardUrl = buildDashboardUrl(request.id);
 
   // R47.6: distinguish "no businesses ever called" (coverage gap)
@@ -474,17 +481,26 @@ function fireDeliveredAnalytics(request: ProcessingRequest): Promise<void> {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
-async function resolveRecipient(
+/**
+ * Exported so the admin "resend report" action can build the same
+ * payload the cron originally would have. Takes primitive args (not
+ * the file-local ProcessingRequest type) so external callers don't
+ * need to import internal cron types.
+ */
+export async function resolveRecipient(
   admin: SupabaseClient,
-  request: ProcessingRequest
+  args: {
+    userId: string | null;
+    intakeData: Record<string, unknown> | null;
+  }
 ): Promise<{ email: string; name: string | null } | null> {
   // Prefer authed user's profile email — that's the account they can
   // sign into to release contacts. Covers the normal post-claim path.
-  if (request.user_id) {
+  if (args.userId) {
     const { data: profile } = await admin
       .from('profiles')
       .select('email, full_name')
-      .eq('id', request.user_id)
+      .eq('id', args.userId)
       .maybeSingle();
     if (profile?.email) {
       return { email: profile.email, name: profile.full_name ?? null };
@@ -493,22 +509,35 @@ async function resolveRecipient(
 
   // Guest fallback. The intake forms store these fields consistently;
   // see lib/forms/*-intake.ts.
-  const intake = request.intake_data ?? {};
+  const intake = args.intakeData ?? {};
   const email = stringOrNull(intake['contact_email']);
   if (!email) return null;
   const name = stringOrNull(intake['contact_name']);
   return { email, name };
 }
 
-function buildCoverageSummary(r: ProcessingRequest): string {
-  const reached = r.total_calls_completed;
-  const planned = r.total_businesses_to_call;
-  const quoted = r.total_quotes_collected;
+/**
+ * Exported for the admin resend action. Same string the cron-sent
+ * report contained — keeps the resend's body byte-identical to what
+ * a fresh send would produce.
+ */
+export function buildCoverageSummary(args: {
+  totalCallsCompleted: number;
+  totalBusinessesToCall: number;
+  totalQuotesCollected: number;
+}): string {
+  const reached = args.totalCallsCompleted;
+  const planned = args.totalBusinessesToCall;
+  const quoted = args.totalQuotesCollected;
   if (planned === 0) return `${quoted} quote${quoted === 1 ? '' : 's'} collected.`;
   return `We reached ${reached} of ${planned} local pros and collected ${quoted} quote${quoted === 1 ? '' : 's'}.`;
 }
 
-function buildDashboardUrl(requestId: string): string {
+/**
+ * Exported for the admin resend action. Same NEXT_PUBLIC_APP_URL
+ * fallback as the original send.
+ */
+export function buildDashboardUrl(requestId: string): string {
   const base =
     process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') ??
     'https://evenquote.com';
