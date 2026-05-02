@@ -59,6 +59,10 @@ export async function generateMetadata({
     description: live
       ? `Tell us about your ${category.name.toLowerCase()}. We'll call the pros and send you the numbers.`
       : `Join the waitlist — we'll email you when ${category.name.toLowerCase()} goes live.`,
+    // Per-vertical canonical so Google indexes each landing page on its
+    // clean URL, not the UTM-parameterized variants Google Ads sends.
+    // Resolves against metadataBase from app/layout.tsx.
+    alternates: { canonical: `/get-quotes/${params.category}` },
   };
 }
 

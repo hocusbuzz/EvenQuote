@@ -18,6 +18,9 @@ import { createAdminClient } from '@/lib/supabase/admin';
 export const metadata = {
   title: 'Get quotes — EvenQuote',
   description: 'Pick a service. We\'ll call local pros and send you the numbers.',
+  // Canonical fixes UTM-parameter splitting from paid traffic. Without
+  // it Google treats every ?utm_source=… variant as a distinct URL.
+  alternates: { canonical: '/get-quotes' },
 };
 
 // Render per-request so adding/disabling a service_categories row reflects
