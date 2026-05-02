@@ -221,6 +221,13 @@ describe('createCheckoutSession', () => {
     expect(payload.line_items[0].price_data.currency).toBe('usd');
     // Email should be lowered + trimmed
     expect(payload.customer_email).toBe('hello@example.com');
+    // Locks the May 2026 fix: receipt_email MUST be set on
+    // payment_intent_data so Stripe actually emails the receipt.
+    // customer_email alone only prefills the form — does NOT trigger
+    // a receipt. A real customer noticed receipts were never arriving.
+    expect(payload.payment_intent_data?.receipt_email).toBe(
+      'hello@example.com',
+    );
     expect(payload.client_reference_id).toBe('11111111-2222-3333-4444-555555555555');
     expect(payload.metadata.quote_request_id).toBe('11111111-2222-3333-4444-555555555555');
     expect(payload.metadata.destination_city).toBe('Austin');

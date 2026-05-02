@@ -151,6 +151,20 @@ export async function createCheckoutSession(
         },
       ],
       customer_email: contactEmail,
+      // ── receipt_email is load-bearing for actual receipt delivery ──
+      //
+      // `customer_email` above ONLY prefills the email input at the
+      // Stripe-hosted checkout page. It does NOT trigger Stripe's
+      // automated receipt email. For payment-mode sessions you need
+      // `payment_intent_data.receipt_email` separately. Without it,
+      // the customer pays $9.99 and never gets a Stripe receipt — a
+      // real customer noticed this on 2026-05-01 ("I never received
+      // the Stripe receipt"). This also requires the Stripe dashboard
+      // toggle Settings → Emails → "Successful payments" to be ON
+      // (enabled by default for new accounts but worth verifying).
+      payment_intent_data: {
+        receipt_email: contactEmail,
+      },
       // client_reference_id is the canonical place to link a Checkout Session
       // to your own entity. We read it back from the webhook.
       client_reference_id: request.id,
