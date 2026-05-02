@@ -42,7 +42,7 @@ type CandidateRow = {
   retry_count: number;
   last_retry_at: string | null;
   created_at: string;
-  businesses: { name: string; phone: string } | null;
+  businesses: { name: string; phone: string; last_called_at: string | null } | null;
   quote_requests:
     | {
         intake_data: Record<string, unknown> | null;
@@ -202,7 +202,11 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     retry_count: 0,
     last_retry_at: null,
     created_at: new Date().toISOString(),
-    businesses: { name: 'Acme Movers', phone: '+14155551234' },
+    businesses: {
+      name: 'Acme Movers',
+      phone: '+14155551234',
+      last_called_at: null,
+    },
     quote_requests: {
       intake_data: {
         // PII — must NOT leak through.
@@ -310,6 +314,84 @@ describe('retryFailedCalls', () => {
     });
     const { admin } = makeAdmin({
       candidates: [candidate({ last_retry_at: sixMinutesAgo })],
+    });
+
+    const result = await retryFailedCalls(admin);
+
+    expect(result.throttled).toBe(0);
+    expect(result.retried).toBe(1);
+    expect(result.succeeded).toBe(1);
+  });
+
+  // ── Per-business spacing (added 2026-05-02) ────────────────────────
+  // Locks the contractor-protection rule: don't dial a business whose
+  // number was last called for ANY request within 30 minutes. Without
+  // this, the retry cron could double-dial a contractor minutes apart
+  // (two different paid customers both fail-dispatched the same biz).
+
+  it('per-business spacing: skips when business.last_called_at < 30 min ago, even from a different request', async () => {
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const { admin, state } = makeAdmin({
+      candidates: [
+        candidate({
+          // last_retry_at on the row is null/old — would normally be eligible.
+          last_retry_at: null,
+          businesses: {
+            name: 'Acme Movers',
+            phone: '+14155551234',
+            // But the BUSINESS was just dialed for some other request.
+            last_called_at: tenMinutesAgo,
+          },
+        }),
+      ],
+    });
+
+    const result = await retryFailedCalls(admin);
+
+    expect(result.throttled).toBe(1);
+    expect(result.retried).toBe(0);
+    expect(startOutboundSpy).not.toHaveBeenCalled();
+    expect(state.callsUpdates).toHaveLength(0);
+    // Note explains WHY for ops debugging.
+    expect(result.notes.some((n) => /per-business spacing/.test(n))).toBe(true);
+  });
+
+  it('per-business spacing: PROCEEDS when business.last_called_at is older than 30 min', async () => {
+    const fortyMinutesAgo = new Date(Date.now() - 40 * 60 * 1000).toISOString();
+    startOutboundSpy.mockResolvedValue({
+      ok: true,
+      simulated: false,
+      vapiCallId: 'vapi_new_1',
+    });
+    const { admin } = makeAdmin({
+      candidates: [
+        candidate({
+          businesses: {
+            name: 'Acme Movers',
+            phone: '+14155551234',
+            last_called_at: fortyMinutesAgo,
+          },
+        }),
+      ],
+    });
+
+    const result = await retryFailedCalls(admin);
+
+    expect(result.throttled).toBe(0);
+    expect(result.retried).toBe(1);
+    expect(result.succeeded).toBe(1);
+  });
+
+  it('per-business spacing: PROCEEDS when business has never been called (null last_called_at)', async () => {
+    // Cold-start: a business that's been seeded but never dialed yet.
+    // The spacing check must not block the first dial.
+    startOutboundSpy.mockResolvedValue({
+      ok: true,
+      simulated: false,
+      vapiCallId: 'vapi_first_dial',
+    });
+    const { admin } = makeAdmin({
+      candidates: [candidate({ /* default last_called_at: null */ })],
     });
 
     const result = await retryFailedCalls(admin);

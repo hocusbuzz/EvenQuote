@@ -63,6 +63,19 @@ const MAX_PER_RUN = 25;
 // having a bad hour.
 const THROTTLE_MINUTES = 5;
 
+// Don't dial a contractor whose number was called for ANY request within
+// this many minutes. Per-BUSINESS spacing (not per-call) — protects
+// against the scenario where two paid customers both fail-dispatched
+// the same business minutes apart, and the retry cron then dials it
+// twice in quick succession. From the contractor's POV that reads as
+// spam (missed call → unrelated callback within minutes) and damages
+// supply-side trust over time.
+//
+// We use businesses.last_called_at (already maintained by the engine
+// + retry success path) so this requires no new column. The comparison
+// is against business.last_called_at, NOT the call row's last_retry_at.
+const PER_BUSINESS_SPACING_MINUTES = 30;
+
 type RetryCandidate = {
   id: string;
   quote_request_id: string;
@@ -75,7 +88,16 @@ type RetryCandidate = {
 // Matches the select below. The joined objects come back as object-
 // or-array depending on cardinality — the supabase-js types we hit here
 // are loose, so we narrow manually.
-type BusinessJoin = { name: string; phone: string };
+//
+// businesses.last_called_at is the per-business spacing gate (added
+// 2026-05-02). Engine + retry success path both bump it on every
+// dispatch; we read it here to skip retries that would dial a
+// contractor too soon after their last call.
+type BusinessJoin = {
+  name: string;
+  phone: string;
+  last_called_at: string | null;
+};
 type RequestJoin = { intake_data: Record<string, unknown> | null };
 
 export type RetryRunResult = {
@@ -111,7 +133,7 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
       retry_count,
       last_retry_at,
       created_at,
-      businesses:business_id ( name, phone ),
+      businesses:business_id ( name, phone, last_called_at ),
       quote_requests:quote_request_id ( intake_data, city, state, zip_code )
     `)
     .eq('status', 'failed')
@@ -153,6 +175,13 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
     }
   >;
 
+  // Per-business spacing cutoff (added 2026-05-02). Computed once
+  // outside the loop so each candidate compares against the same
+  // moment-in-time anchor.
+  const perBusinessCutoffIso = new Date(
+    Date.now() - PER_BUSINESS_SPACING_MINUTES * 60 * 1000,
+  ).toISOString();
+
   let retried = 0;
   let succeeded = 0;
   let failed = 0;
@@ -168,6 +197,19 @@ export async function retryFailedCalls(admin: SupabaseClient): Promise<RetryRunR
     const qr = flattenOne(row.quote_requests);
     if (!biz || !qr) {
       notes.push(`call ${row.id}: missing business/request join — skipping`);
+      continue;
+    }
+
+    // Per-business spacing gate. Skip if this contractor was dialed
+    // (for ANY request) within PER_BUSINESS_SPACING_MINUTES. Counts
+    // as throttled in the result so ops can see how often this fires.
+    // Cron runs every ~10 min, so a skipped row gets re-evaluated soon
+    // after the spacing window expires.
+    if (biz.last_called_at && biz.last_called_at > perBusinessCutoffIso) {
+      throttled += 1;
+      notes.push(
+        `call ${row.id}: per-business spacing — last dialed ${biz.last_called_at}`,
+      );
       continue;
     }
 
