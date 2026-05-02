@@ -14,7 +14,7 @@
 // Google Fonts helper (those are Next 15+). The `geist` package gives us
 // the same self-hosted, CSS-variable-based API with no external requests.
 
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Fraunces } from 'next/font/google';
 import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
@@ -40,6 +40,19 @@ const fraunces = Fraunces({
 const METADATA_BASE = new URL(
   process.env.NEXT_PUBLIC_APP_URL ?? 'https://evenquote.com'
 );
+
+// Mobile viewport — without this, iOS Safari renders the page at
+// desktop width (~980px) and zooms out to fit, making form fields
+// microscopic and buttons untappable. Next 14 ships viewport via
+// `export const viewport`, NOT inside metadata (the latter is
+// deprecated and silently ignored). initialScale:1 prevents the
+// zoom-out behavior; we deliberately omit `maximum-scale` /
+// `user-scalable:no` because blocking pinch-zoom is an accessibility
+// regression — visually-impaired users need to zoom intake fields.
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+};
 
 export const metadata: Metadata = {
   metadataBase: METADATA_BASE,

@@ -323,7 +323,7 @@ export default async function RequestDetailPage({
                 key={q.id}
                 className="rounded-lg border border-border bg-card p-5 text-card-foreground"
               >
-                <div className="flex items-start justify-between gap-4">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-display text-lg font-semibold">
