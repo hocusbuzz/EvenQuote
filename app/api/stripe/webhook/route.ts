@@ -48,7 +48,10 @@ import { captureException, captureMessage } from '@/lib/observability/sentry';
 import { sendEmail } from '@/lib/email/resend';
 import { trackServer } from '@/lib/analytics/track-server';
 import type { AnalyticsEventParams } from '@/lib/analytics/events';
-import { renderCallsScheduled } from '@/lib/email/templates';
+import {
+  renderCallsScheduled,
+  renderNewPaymentAlert,
+} from '@/lib/email/templates';
 import { resolveTimezoneFromState } from '@/lib/scheduling/business-hours';
 
 const log = createLogger('stripe/webhook');
@@ -329,14 +332,21 @@ async function handleCheckoutCompleted(
 // Post-payment side effects (#121 — async via waitUntil)
 // ─────────────────────────────────────────────────────────────────────
 //
-// Three things happen here, all best-effort with their own error
-// envelopes. None of them blocks the Stripe 200 response; all of them
-// log + Sentry-capture on failure.
+// All steps are best-effort with their own error envelopes. None
+// blocks the Stripe 200 response; all log + Sentry-capture on failure.
 //
-//   A. sendPaymentMagicLink   — passwordless sign-in for guest claim flow
-//   B. seedBusinessesForRequest — Google Places searchText for cold zips
-//   C. enqueueQuoteCalls      — kick off Vapi dispatch (or defer per #117)
-//      (with the existing advanced:false → park-for-refund handling)
+//   A.  sendPaymentMagicLink     — passwordless sign-in for guest claim
+//   B.  seedBusinessesForRequest — Google Places searchText for cold zips
+//   C.  enqueueQuoteCalls        — kick off Vapi dispatch (or defer per #117)
+//                                   (with advanced:false → park-for-refund)
+//   C2. renderCallsScheduled     — when C deferred, email "calls scheduled
+//                                   for X" so customer doesn't read the
+//                                   silence as broken
+//   D.  trackServer paid event   — server-side analytics backstop for
+//                                   close-the-tab conversions GA4/Pixel miss
+//   E.  renderNewPaymentAlert    — founder "new paid request" ping during
+//                                   launch window. Env-gated; opt-out via
+//                                   EVENQUOTE_NEW_PAYMENT_ALERTS=false
 //
 // Order matters: seed before enqueue because the engine's selector reads
 // the freshly seeded rows. Magic-link is independent; we kick it off
@@ -625,6 +635,73 @@ async function runPostPaymentSideEffects(args: {
     // is belt-and-suspenders. Log only — analytics MUST NOT break
     // the post-payment flow.
     log.warn('analytics quote_request_paid fire threw', { err, requestId });
+  }
+
+  // ── E. Founder "new payment" alert ───────────────────────────────
+  // Tells the founder a real customer paid — useful during the launch
+  // window when paid traffic is invisible without watching /admin.
+  // Two gates:
+  //   • EVENQUOTE_SUPPORT_EMAIL must be set (no recipient otherwise)
+  //   • EVENQUOTE_NEW_PAYMENT_ALERTS must NOT equal 'false' (explicit
+  //     opt-out for when volume turns this into noise — set to 'false'
+  //     in Vercel and the alert silently no-ops)
+  // Best-effort: a send failure logs + captures but does not bubble.
+  const supportEmail = process.env.EVENQUOTE_SUPPORT_EMAIL?.trim();
+  const alertsDisabled =
+    process.env.EVENQUOTE_NEW_PAYMENT_ALERTS?.toLowerCase() === 'false';
+  if (supportEmail && !alertsDisabled) {
+    try {
+      const adminForLoc = createAdminClient();
+      const { data: locRow } = await adminForLoc
+        .from('quote_requests')
+        .select('city, state, zip_code')
+        .eq('id', requestId)
+        .maybeSingle();
+      const location = locRow
+        ? `${locRow.city ?? ''}, ${locRow.state ?? ''} ${locRow.zip_code ?? ''}`.trim()
+        : '(unknown)';
+      const adminUrl = process.env.NEXT_PUBLIC_APP_URL
+        ? `${process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '')}/admin/requests/${requestId}`
+        : '';
+      const rendered = renderNewPaymentAlert({
+        requestId,
+        amountUsd,
+        categoryName,
+        location,
+        contactName,
+        contactEmail,
+        adminUrl,
+      });
+      const send = await sendEmail({
+        to: supportEmail,
+        subject: rendered.subject,
+        html: rendered.html,
+        text: rendered.text,
+        tag: 'new-payment-alert',
+      });
+      if (!send.ok) {
+        log.warn('new-payment alert send failed', {
+          requestId,
+          err: send.error,
+        });
+        captureException(new Error(`new-payment alert: ${send.error}`), {
+          tags: {
+            route: 'stripe/webhook',
+            site: 'new-payment-alert',
+            requestId,
+          },
+        });
+      }
+    } catch (err) {
+      log.warn('new-payment alert step threw', { err, requestId });
+      captureException(err, {
+        tags: {
+          route: 'stripe/webhook',
+          site: 'new-payment-alert',
+          requestId,
+        },
+      });
+    }
   }
 }
 

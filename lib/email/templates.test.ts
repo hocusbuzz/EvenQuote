@@ -10,9 +10,11 @@ import {
   renderQuoteReport,
   renderContactRelease,
   renderCallsScheduled,
+  renderNewPaymentAlert,
   type QuoteReportInput,
   type ContactReleaseInput,
   type CallsScheduledInput,
+  type NewPaymentAlertInput,
 } from './templates';
 
 function baseQuoteInput(
@@ -444,5 +446,115 @@ describe('renderCallsScheduled', () => {
     );
     expect(out.html).toContain('12:00');
     expect(out.html.toUpperCase()).toContain('EDT');
+  });
+});
+
+// ─── renderNewPaymentAlert ──────────────────────────────────────────
+
+function baseAlertInput(overrides: Partial<NewPaymentAlertInput> = {}): NewPaymentAlertInput {
+  return {
+    requestId: 'cbfe6980-6252-4854-a889-1d3231e53df5',
+    amountUsd: 9.99,
+    categoryName: 'Handyman',
+    location: 'San Marcos, CA 92078',
+    contactName: 'Antonio',
+    contactEmail: 'antonio@example.com',
+    adminUrl: 'https://evenquote.com/admin/requests/cbfe6980-6252-4854-a889-1d3231e53df5',
+    ...overrides,
+  };
+}
+
+describe('renderNewPaymentAlert', () => {
+  it('subject includes amount, category, and location', () => {
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.subject).toContain('$9.99');
+    expect(out.subject).toContain('Handyman');
+    expect(out.subject).toContain('San Marcos, CA 92078');
+  });
+
+  it('subject leads with the money emoji so it reads at a glance in inbox', () => {
+    // The leading emoji is a deliberate UX choice — at a glance in
+    // a list of subject lines, this row jumps out as "good news,
+    // not a stuck-request alert." Locking the prefix.
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.subject.startsWith('💰')).toBe(true);
+  });
+
+  it('falls back to "Service" when categoryName is null', () => {
+    const out = renderNewPaymentAlert(baseAlertInput({ categoryName: null }));
+    expect(out.subject).toContain('Service');
+    expect(out.html).toContain('service');
+  });
+
+  it('renders the request id (first 8 chars) as a clickable admin link when adminUrl is set', () => {
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.html).toContain('href="https://evenquote.com/admin/requests/cbfe6980-6252-4854-a889-1d3231e53df5"');
+    expect(out.html).toContain('cbfe6980'); // first 8 chars only
+    // Don't leak the full UUID into the rendered HTML beyond the href.
+    expect(out.html.match(/cbfe6980-6252-4854-a889-1d3231e53df5/g)?.length).toBe(1);
+  });
+
+  it('renders the request id as plain code when adminUrl is empty (NEXT_PUBLIC_APP_URL unset)', () => {
+    const out = renderNewPaymentAlert(baseAlertInput({ adminUrl: '' }));
+    expect(out.html).not.toContain('<a href');
+    expect(out.html).toContain('cbfe6980');
+  });
+
+  it('includes contact name + email in the customer block when both present', () => {
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.html).toContain('Antonio');
+    // Email is rendered inside &lt;...&gt; (HTML-escaped angle brackets).
+    expect(out.html).toContain('antonio@example.com');
+  });
+
+  it('omits the customer block entirely when both name and email are null (no PII placeholder)', () => {
+    const out = renderNewPaymentAlert(
+      baseAlertInput({ contactName: null, contactEmail: null }),
+    );
+    expect(out.html).not.toContain('Customer:');
+  });
+
+  it('falls back gracefully when only the email is present', () => {
+    const out = renderNewPaymentAlert(
+      baseAlertInput({ contactName: null }),
+    );
+    expect(out.html).toContain('antonio@example.com');
+    expect(out.html).toContain('(no name)');
+  });
+
+  it('mentions the EVENQUOTE_NEW_PAYMENT_ALERTS opt-out so the recipient knows how to mute', () => {
+    // Self-documenting unsubscribe instructions — the founder shouldn't
+    // need to grep the codebase to find the env var when these get noisy.
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.html).toContain('EVENQUOTE_NEW_PAYMENT_ALERTS=false');
+    expect(out.text).toContain('EVENQUOTE_NEW_PAYMENT_ALERTS=false');
+  });
+
+  it('escapes HTML in customer-supplied fields (XSS guard)', () => {
+    // contactName + contactEmail come from intake_data which is
+    // user-controlled. A malicious customer could put script tags
+    // there expecting to land in the founder's email client. We
+    // assert the dangerous CHARS (raw <, ", ') don't survive — the
+    // resulting string may still contain the substring 'alert(1)'
+    // as plain text, which is fine: it can't execute without the
+    // surrounding tag context.
+    const out = renderNewPaymentAlert(
+      baseAlertInput({
+        contactName: '<script>alert(1)</script>',
+        contactEmail: '"><img src=x onerror=alert(1)>',
+      }),
+    );
+    // The literal opening-tag forms must not survive escaping.
+    expect(out.html).not.toContain('<script>');
+    expect(out.html).not.toContain('<img ');
+    // And the escaped forms must be present, proving the escape ran.
+    expect(out.html).toContain('&lt;script&gt;');
+    expect(out.html).toContain('&lt;img');
+  });
+
+  it('text version contains the request id and admin URL', () => {
+    const out = renderNewPaymentAlert(baseAlertInput());
+    expect(out.text).toContain('cbfe6980-6252-4854-a889-1d3231e53df5');
+    expect(out.text).toContain('https://evenquote.com/admin/requests/');
   });
 });

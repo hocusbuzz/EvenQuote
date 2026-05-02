@@ -413,6 +413,90 @@ export function renderStuckRequestsAlert(input: {
   return { subject, html: htmlShell(inner), text };
 }
 
+// ─── 1c. New-payment founder alert ─────────────────────────────────
+//
+// Sent by the Stripe webhook the moment a payment lands. Audience is
+// "the founder during the launch window" — short, motivating, deep
+// link to the request in /admin so the natural next click is "open it
+// and watch the calls fire."
+//
+// Env-gated to default on when EVENQUOTE_SUPPORT_EMAIL is set, with an
+// explicit opt-out via EVENQUOTE_NEW_PAYMENT_ALERTS=false. The opt-out
+// matters at scale — at 100+ paying customers/day this becomes noise.
+// Today (pre-launch) it's the loudest "we're in business" signal we
+// have.
+//
+// Not customer-facing.
+
+export type NewPaymentAlertInput = {
+  /** quote_request UUID. Renders as the first 8 chars in the subject. */
+  requestId: string;
+  amountUsd: number;
+  /** e.g. "Handyman", "Moving". Falls through to "Service" if absent. */
+  categoryName: string | null;
+  /** "City, ST ZIP" — same shape we use everywhere else for locations. */
+  location: string;
+  /** Customer-supplied name from intake. May be null. */
+  contactName: string | null;
+  /** Customer-supplied email — handy for ops responding manually. */
+  contactEmail: string | null;
+  /** Deep link to /admin/requests/<id>. Empty string when APP_URL unset. */
+  adminUrl: string;
+};
+
+export function renderNewPaymentAlert(input: NewPaymentAlertInput): Rendered {
+  const cat = input.categoryName ?? 'Service';
+  const subject = `💰 New paid request — $${input.amountUsd.toFixed(2)} — ${cat} in ${input.location}`;
+
+  const link = input.adminUrl
+    ? `<a href="${escapeHtml(input.adminUrl)}" style="color:#0A0A0A; text-decoration:underline; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">${escapeHtml(input.requestId.slice(0, 8))}</a>`
+    : `<code style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">${escapeHtml(input.requestId.slice(0, 8))}</code>`;
+
+  const contactBlock = input.contactName || input.contactEmail
+    ? `
+      <p style="font-size:13px; margin:0 0 6px 0; color:#6b7280;">
+        <strong style="color:#0A0A0A;">Customer:</strong>
+        ${escapeHtml(input.contactName ?? '(no name)')}${
+          input.contactEmail
+            ? ` &lt;${escapeHtml(input.contactEmail)}&gt;`
+            : ''
+        }
+      </p>`
+    : '';
+
+  const inner = `
+    <p style="font-size:18px; margin:0 0 14px 0;">
+      <strong>$${input.amountUsd.toFixed(2)}</strong> for a ${escapeHtml(cat.toLowerCase())} quote in ${escapeHtml(input.location)}.
+    </p>
+    ${contactBlock}
+    <p style="font-size:13px; margin:0 0 16px 0; color:#6b7280;">
+      Request ${link} — open it to watch the calls fire live.
+    </p>
+    <p style="font-size:11px; margin:24px 0 0 0; color:#9ca3af;">
+      Mute this alert with EVENQUOTE_NEW_PAYMENT_ALERTS=false in your
+      Vercel env. Stuck-request and dispute alerts stay on.
+    </p>
+  `;
+
+  const text = [
+    `New paid request — $${input.amountUsd.toFixed(2)}`,
+    '',
+    `${cat} in ${input.location}`,
+    input.contactName || input.contactEmail
+      ? `Customer: ${input.contactName ?? '(no name)'}${input.contactEmail ? ` <${input.contactEmail}>` : ''}`
+      : '',
+    '',
+    `Request ID: ${input.requestId}`,
+    input.adminUrl ? `Admin link: ${input.adminUrl}` : '',
+    '',
+    'Mute via EVENQUOTE_NEW_PAYMENT_ALERTS=false in Vercel.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return { subject, html: htmlShell(inner), text };
+}
+
 // ─── 2. Contact release → business ──────────────────────────────────
 //
 // Sent when a customer opts into sharing their contact info with a

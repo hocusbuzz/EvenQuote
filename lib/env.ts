@@ -58,6 +58,14 @@ const ServerEnvSchema = z.object({
   // normalized in production).
   EVENQUOTE_SUPPORT_EMAIL: EnvEmailSchema.optional(),
 
+  // ─── Founder "new payment" alert toggle ────────────────────────
+  // Defaults to ON when EVENQUOTE_SUPPORT_EMAIL is set. Set to
+  // 'false' in Vercel to mute the per-payment alert when volume
+  // turns it into noise (the stuck-request and dispute alerts on
+  // the same support email stay ON regardless). Loose string here
+  // — the runtime check in the webhook is `?.toLowerCase() === 'false'`.
+  EVENQUOTE_NEW_PAYMENT_ALERTS: z.string().optional(),
+
   // ─── Quote extraction (optional) ───────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_EXTRACTION_MODEL: z.string().optional(),
