@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { HoneypotInput } from '@/components/security/honeypot-input';
 import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
+import { TurnstileWidget } from '@/components/security/turnstile-widget';
 
 type Props = {
   categorySlug: string;
@@ -30,6 +31,7 @@ export function WaitlistCapture({
   const [email, setEmail] = useState('');
   const [zip, setZip] = useState('');
   const [honeypot, setHoneypot] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ alreadyOnList: boolean } | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -43,6 +45,7 @@ export function WaitlistCapture({
         email,
         zipCode: zip || undefined,
         [HONEYPOT_FIELD_NAME]: honeypot,
+        turnstile_token: turnstileToken,
       });
       if (!result.ok) {
         setError(result.error);
@@ -114,8 +117,9 @@ export function WaitlistCapture({
           </div>
         ) : null}
 
-        {/* Honeypot — see lib/security/honeypot.ts. */}
+        {/* Honeypot + Turnstile — see lib/security/. */}
         <HoneypotInput value={honeypot} onChange={setHoneypot} />
+        <TurnstileWidget onTokenChange={setTurnstileToken} />
 
         <Button type="submit" variant="lime" disabled={isPending} className="w-full sm:w-auto">
           {isPending ? 'Adding you…' : 'Notify me when it\'s live'}

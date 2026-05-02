@@ -23,6 +23,7 @@ import { submitMovingIntake } from '@/lib/actions/intake';
 import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
 import { HoneypotInput } from '@/components/security/honeypot-input';
 import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
+import { TurnstileWidget } from '@/components/security/turnstile-widget';
 
 export function IntakeFormShell() {
   const hydrated = useIsHydrated();
@@ -42,6 +43,12 @@ export function IntakeFormShell() {
   // input populate it. See lib/security/honeypot.ts. Kept in local
   // useState (not Zustand) so it never persists to localStorage.
   const [honeypot, setHoneypot] = useState('');
+  // Cloudflare Turnstile token. Empty string when:
+  //   • Turnstile is not configured (env vars unset) — server-side
+  //     verifier soft-allows in that case
+  //   • Widget hasn't produced a token yet (challenge still in flight)
+  //   • Token expired — widget auto-resets and re-issues
+  const [turnstileToken, setTurnstileToken] = useState('');
   const router = useRouter();
 
   // ─── Step navigation ────────────────────────────────────────
@@ -76,6 +83,7 @@ export function IntakeFormShell() {
         ...draft,
         ...utms,
         [HONEYPOT_FIELD_NAME]: honeypot,
+        turnstile_token: turnstileToken,
       });
       if (!result.ok) {
         setSubmitError(result.error);
@@ -141,6 +149,8 @@ export function IntakeFormShell() {
 
       {/* Honeypot — invisible to humans, harvested by naive bots. */}
       <HoneypotInput value={honeypot} onChange={setHoneypot} />
+      {/* Turnstile — env-gated, renders nothing when not configured. */}
+      <TurnstileWidget onTokenChange={setTurnstileToken} />
     </>
   );
 }

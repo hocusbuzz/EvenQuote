@@ -18,6 +18,7 @@ import { assertRateLimitFromHeaders } from '@/lib/security/rate-limit-auth';
 import { createLogger } from '@/lib/logger';
 import { EmailSchema, ZipSchema } from '@/lib/forms/moving-intake';
 import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
+import { verifyTurnstileToken } from '@/lib/security/turnstile';
 
 const log = createLogger('joinWaitlist');
 
@@ -66,6 +67,18 @@ export async function joinWaitlist(raw: unknown): Promise<WaitlistResult> {
       ok: false,
       error: `Too many requests. Try again in ${deny.retryAfterSec}s.`,
     };
+  }
+
+  // Turnstile verify — see intake.ts (moving) for the rationale.
+  // No-op when env vars unset; verifies in production.
+  const tsToken =
+    raw && typeof raw === 'object'
+      ? ((raw as Record<string, unknown>).turnstile_token as string | undefined)
+      : undefined;
+  const ts = await verifyTurnstileToken({ token: tsToken });
+  if (!ts.ok) {
+    log.info('turnstile verify failed', { lib: 'waitlist', reason: ts.reason });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
   }
 
   const parsed = WaitlistSchema.safeParse(raw);

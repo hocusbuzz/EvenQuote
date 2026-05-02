@@ -130,6 +130,25 @@ const ServerEnvSchema = z.object({
     .min(20, 'Meta CAPI token looks short')
     .optional(),
 
+  // ─── Anti-spam — Cloudflare Turnstile (optional) ────────────────
+  // Free invisible CAPTCHA. Both vars must be set for the protection
+  // to fire — when either is missing, the entire Turnstile path is a
+  // no-op (client widget renders nothing, server verification returns
+  // ok). See lib/security/turnstile.ts for the runtime behavior +
+  // soft-allow-on-outage rationale.
+  //
+  // Site keys look like '0x4AAAAAAAxxxxxxxx' (hex-ish, ~22 chars after
+  // the 0x prefix). Secret keys are similar shape. Generated in
+  // Cloudflare Dashboard → Turnstile → Add Site → free plan.
+  NEXT_PUBLIC_TURNSTILE_SITE_KEY: z
+    .string()
+    .min(8, 'Turnstile site key looks short')
+    .optional(),
+  TURNSTILE_SECRET_KEY: z
+    .string()
+    .min(8, 'Turnstile secret key looks short')
+    .optional(),
+
   // ─── Maintenance mode ──────────────────────────────────────────
   MAINTENANCE_MODE: BooleanString.optional(),
   MAINTENANCE_PREVIEW_TOKEN: z.string().optional(),

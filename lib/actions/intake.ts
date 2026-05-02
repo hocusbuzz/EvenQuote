@@ -32,6 +32,7 @@ import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
 import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
+import { verifyTurnstileToken } from '@/lib/security/turnstile';
 
 const log = createLogger('submitMovingIntake');
 
@@ -89,6 +90,25 @@ export async function submitMovingIntake(raw: unknown): Promise<SubmitResult> {
       ok: false,
       error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
     };
+  }
+
+  // 0c. Turnstile verify (env-gated). When TURNSTILE_SECRET_KEY is
+  // unset (local dev / preview), this is a no-op that returns ok:true
+  // — see lib/security/turnstile.ts. Production with both env vars
+  // set actually verifies the token Cloudflare's challenge produced.
+  // Runs AFTER the rate limit so we don't waste API quota on flooders.
+  const tsToken =
+    raw && typeof raw === 'object'
+      ? ((raw as Record<string, unknown>).turnstile_token as string | undefined)
+      : undefined;
+  const ts = await verifyTurnstileToken({ token: tsToken });
+  if (!ts.ok) {
+    log.info('turnstile verify failed', {
+      lib: 'intake',
+      vertical: 'moving',
+      reason: ts.reason,
+    });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
   }
 
   // 1. Validate

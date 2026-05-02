@@ -18,6 +18,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getUser } from '@/lib/auth';
 import { rateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
 import { isHoneypotTripped, HONEYPOT_GENERIC_ERROR } from '@/lib/security/honeypot';
+import { verifyTurnstileToken } from '@/lib/security/turnstile';
 import { createLogger } from '@/lib/logger';
 import { captureException } from '@/lib/observability/sentry';
 
@@ -55,6 +56,21 @@ export async function submitCleaningIntake(raw: unknown): Promise<SubmitResult> 
       ok: false,
       error: `Too many requests. Try again in ${rl.retryAfterSec}s.`,
     };
+  }
+
+  // 0c. Turnstile verify — see intake.ts (moving) for the rationale.
+  const tsToken =
+    raw && typeof raw === 'object'
+      ? ((raw as Record<string, unknown>).turnstile_token as string | undefined)
+      : undefined;
+  const ts = await verifyTurnstileToken({ token: tsToken });
+  if (!ts.ok) {
+    log.info('turnstile verify failed', {
+      lib: 'intake',
+      vertical: 'cleaning',
+      reason: ts.reason,
+    });
+    return { ok: false, error: HONEYPOT_GENERIC_ERROR };
   }
 
   // 1. Validate

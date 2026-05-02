@@ -19,6 +19,7 @@ import { submitJunkRemovalIntake } from '@/lib/actions/junk-removal-intake';
 import { useUtmsStore, useIsUtmsHydrated } from '@/lib/marketing/utms-store';
 import { HoneypotInput } from '@/components/security/honeypot-input';
 import { HONEYPOT_FIELD_NAME } from '@/lib/security/honeypot';
+import { TurnstileWidget } from '@/components/security/turnstile-widget';
 
 export function JunkRemovalFormShell() {
   const hydrated = useIsJunkRemovalHydrated();
@@ -31,8 +32,9 @@ export function JunkRemovalFormShell() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  // See form-shell.tsx (moving) for the honeypot rationale.
+  // See form-shell.tsx (moving) for the honeypot + turnstile rationale.
   const [honeypot, setHoneypot] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState('');
   const router = useRouter();
 
   const currentIndex = STEPS.findIndex((s) => s.id === currentStep);
@@ -59,6 +61,7 @@ export function JunkRemovalFormShell() {
         ...draft,
         ...utms,
         [HONEYPOT_FIELD_NAME]: honeypot,
+        turnstile_token: turnstileToken,
       });
       if (!result.ok) {
         setSubmitError(result.error);
@@ -117,8 +120,9 @@ export function JunkRemovalFormShell() {
         submitting={isPending}
       />
 
-      {/* Honeypot — see form-shell.tsx (moving). */}
+      {/* Honeypot + Turnstile — see form-shell.tsx (moving). */}
       <HoneypotInput value={honeypot} onChange={setHoneypot} />
+      <TurnstileWidget onTokenChange={setTurnstileToken} />
     </>
   );
 }
