@@ -37,7 +37,19 @@ export default async function AdminOverviewPage() {
   const sinceToday = startOfTodayIso();
 
   // Parallel count queries — each returns a `count` without rows.
+  //
+  // The Today's-pulse cards are funnel-focused (founder's "did launch
+  // convert?" question); the Operations cards below are ops-focused
+  // (the operator's "what's broken right now?" question). Same data
+  // surface, different framing.
   const [
+    // ── Today's pulse (founder funnel) ──────────────────────────
+    requestsStartedToday,
+    paidToday,
+    reportsDeliveredToday,
+    completedRequestsToday,
+    paidAllTimeRows,
+    // ── Operations (ops alerting) ───────────────────────────────
     requests48h,
     paidAllTime,
     callsInProgress,
@@ -45,6 +57,44 @@ export default async function AdminOverviewPage() {
     quotesToday,
     failedDlq,
   ] = await Promise.all([
+    // Today: every quote_request created (any status).
+    admin
+      .from('quote_requests')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', sinceToday),
+    // Today: payments rows in 'completed' status (Stripe webhook hit).
+    // We pull rows + amounts (not head:true) so we can sum revenue.
+    admin
+      .from('payments')
+      .select('amount, currency')
+      .eq('status', 'completed')
+      .gte('created_at', sinceToday),
+    // Today: reports actually delivered (Resend send succeeded). Uses
+    // report_sent_at because send-reports stamps it on outbox claim
+    // BEFORE the email goes out — a row with report_sent_at set is
+    // the closest signal to "we put an email on the wire."
+    admin
+      .from('quote_requests')
+      .select('id', { count: 'exact', head: true })
+      .gte('report_sent_at', sinceToday),
+    // Today: completed requests, with quote counts attached so we can
+    // compute avg quotes/report. Cap at 100 — if we ship 100+ requests
+    // a day this becomes a problem worth solving with a SQL aggregate.
+    admin
+      .from('quote_requests')
+      .select('id, total_quotes_collected')
+      .eq('status', 'completed')
+      .gte('created_at', sinceToday)
+      .limit(100),
+    // All-time revenue. Same cap rationale — a 100-row cap is a
+    // tripwire for "we should switch to a SQL sum() RPC."
+    admin
+      .from('payments')
+      .select('amount')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(1000),
+    // ── Operations queries (unchanged shape) ────────────────────
     admin
       .from('quote_requests')
       .select('id', { count: 'exact', head: true })
@@ -72,6 +122,28 @@ export default async function AdminOverviewPage() {
       .is('started_at', null)
       .gte('retry_count', 1),
   ]);
+
+  // Derived metrics for the pulse panel.
+  const paidCountToday = paidToday.data?.length ?? 0;
+  // Revenue: payments.amount is cents (integer). Sum + format as USD.
+  // We assume all payments are USD because the checkout doesn't expose
+  // a currency switcher today; if that ever changes, group by currency.
+  const revenueTodayCents = (paidToday.data ?? []).reduce(
+    (sum, p) => sum + (p.amount ?? 0),
+    0,
+  );
+  const completedToday = completedRequestsToday.data ?? [];
+  const avgQuotesPerReportToday =
+    completedToday.length > 0
+      ? completedToday.reduce(
+          (sum, r) => sum + (r.total_quotes_collected ?? 0),
+          0,
+        ) / completedToday.length
+      : null;
+  const revenueAllTimeCents = (paidAllTimeRows.data ?? []).reduce(
+    (sum, p) => sum + (p.amount ?? 0),
+    0,
+  );
 
   // Recent quote requests table (last 48h).
   const { data: recentRequests } = await admin
@@ -127,7 +199,68 @@ export default async function AdminOverviewPage() {
           </nav>
         </div>
 
-        {/* KPI cards */}
+        {/* Today's pulse — funnel-focused founder view. Reads top to
+            bottom: did people show up? did they pay? did we deliver?
+            were the deliveries good? Revenue is the loudest card on
+            purpose — it's the first number you check pre-launch. */}
+        <section className="mb-8">
+          <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+            Today&apos;s pulse — {todayHumanLabel()}
+          </p>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-5">
+            <PulseCard
+              label="Revenue today"
+              value={formatUsdCents(revenueTodayCents)}
+              tone={revenueTodayCents > 0 ? 'highlight' : 'neutral'}
+            />
+            <PulseCard
+              label="Paid today"
+              value={String(paidCountToday)}
+              sub={
+                paidCountToday > 0
+                  ? `${paidCountToday * 999 - revenueTodayCents === 0 ? '@$9.99' : 'mixed'}`
+                  : undefined
+              }
+              tone={paidCountToday > 0 ? 'highlight' : 'neutral'}
+            />
+            <PulseCard
+              label="Requests started"
+              value={String(requestsStartedToday.count ?? 0)}
+              sub={
+                (requestsStartedToday.count ?? 0) > 0
+                  ? `${Math.round(
+                      (paidCountToday / (requestsStartedToday.count ?? 1)) * 100,
+                    )}% paid`
+                  : undefined
+              }
+            />
+            <PulseCard
+              label="Reports delivered"
+              value={String(reportsDeliveredToday.count ?? 0)}
+            />
+            <PulseCard
+              label="Avg quotes/report"
+              value={
+                avgQuotesPerReportToday !== null
+                  ? avgQuotesPerReportToday.toFixed(1)
+                  : '—'
+              }
+              sub={
+                avgQuotesPerReportToday !== null
+                  ? `${completedToday.length} report${completedToday.length === 1 ? '' : 's'}`
+                  : 'no completions yet'
+              }
+            />
+          </div>
+          <p className="mt-3 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            Lifetime revenue: {formatUsdCents(revenueAllTimeCents)}
+          </p>
+        </section>
+
+        {/* Operations KPI cards — ops alerting (what's broken right now). */}
+        <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          Operations
+        </p>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
           <KpiCard label="Requests (48h)" value={requests48h.count ?? 0} />
           <KpiCard label="Paid all-time" value={paidAllTime.count ?? 0} />
@@ -238,6 +371,45 @@ function KpiCard({
   );
 }
 
+/**
+ * Pulse cards take a string value (so we can format dollars / decimals
+ * before passing in) plus an optional `sub` for context like "30% paid"
+ * or "@$9.99". Slightly larger numerals than KpiCard since this row
+ * is what the founder reads first.
+ */
+function PulseCard({
+  label,
+  value,
+  sub,
+  tone,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: 'highlight' | 'neutral';
+}) {
+  return (
+    <div
+      className={
+        'rounded-md border-2 border-foreground/80 p-4 ' +
+        (tone === 'highlight' ? 'bg-lime/40' : 'bg-background')
+      }
+    >
+      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+        {label}
+      </p>
+      <p className="mt-1 font-display text-3xl font-bold tabular-nums sm:text-4xl">
+        {value}
+      </p>
+      {sub ? (
+        <p className="mt-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+          {sub}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusPill({ status }: { status: string }) {
   const tone = STATUS_TONE[status] ?? 'bg-foreground/10 text-foreground';
   return (
@@ -265,6 +437,29 @@ function startOfTodayIso(): string {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   return d.toISOString();
+}
+
+function todayHumanLabel(): string {
+  // Server-side render uses the server's TZ. Operator is in Pacific
+  // per CLAUDE.md context — Vercel serverless is UTC. We render the
+  // ISO date intentionally (no timezone math) since "today" is
+  // already anchored to startOfTodayIso() above using the same TZ.
+  // If the operator is reading at midnight UTC, the label flips a few
+  // hours before their local midnight — acceptable for v1.
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Format a USD-cents integer as "$X.XX" or "$X,XXX.XX". Returns "$0.00"
+ * for missing/null. Currency symbol hard-coded to $ — checkout doesn't
+ * expose currency switching today. Add a currency arg if that changes.
+ */
+function formatUsdCents(cents: number): string {
+  const dollars = (cents ?? 0) / 100;
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  }).format(dollars);
 }
 
 function formatRelative(iso: string): string {
