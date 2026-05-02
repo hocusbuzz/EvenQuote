@@ -40,11 +40,19 @@ function mockHeaders(proto = 'http', host = 'localhost:3000') {
 
 function mockOtp(result: { error: { message: string } | null }) {
   const spy = vi.fn().mockResolvedValue(result);
-  vi.doMock('@/lib/supabase/admin', () => ({
-    createAdminClient: () => ({
+  // post-payment.ts now creates a one-shot supabase client directly
+  // via @supabase/supabase-js (with flowType: 'implicit') instead of
+  // going through createAdminClient — see post-payment.ts for the
+  // PKCE-vs-implicit rationale. The test mock follows.
+  vi.doMock('@supabase/supabase-js', () => ({
+    createClient: () => ({
       auth: { signInWithOtp: spy },
     }),
   }));
+  // Env vars the action reads to initialize the client. Only required
+  // since the May 2026 fix moved the client construction inline.
+  process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-key';
   return spy;
 }
 

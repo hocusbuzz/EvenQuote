@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// Supabase server client is mocked. We need a handle to the
-// exchangeCodeForSession spy so each test can assert on it.
+// Supabase server client is mocked. We need handles to BOTH:
+//   • exchangeCodeForSession — OAuth / PKCE path (?code=)
+//   • verifyOtp — magic-link / OTP path (?token_hash=&type=)
+// added by the May 2026 fix so server-initiated magic links from
+// post-payment.ts work without the broken PKCE expectation.
 const mockExchange = vi.fn();
+const mockVerifyOtp = vi.fn();
 vi.mock('@/lib/supabase/server', () => ({
   createClient: async () => ({
-    auth: { exchangeCodeForSession: mockExchange },
+    auth: {
+      exchangeCodeForSession: mockExchange,
+      verifyOtp: mockVerifyOtp,
+    },
   }),
 }));
 
@@ -38,6 +45,7 @@ describe('/auth/callback', () => {
   beforeEach(() => {
     vi.resetModules();
     mockExchange.mockReset();
+    mockVerifyOtp.mockReset();
     captureExceptionMock.mockReset();
   });
 
@@ -73,6 +81,57 @@ describe('/auth/callback', () => {
     expect(res.status).toBe(307);
     expect(res.headers.get('location')).toBe('http://localhost/dashboard');
     expect(mockExchange).toHaveBeenCalledWith('abc');
+    // verifyOtp must NOT fire on the OAuth/PKCE path — wrong API.
+    expect(mockVerifyOtp).not.toHaveBeenCalled();
+  });
+
+  it('verifies the magic-link token_hash via verifyOtp and redirects to /dashboard by default', async () => {
+    // Locks the May 2026 PKCE fix: magic links from post-payment.ts
+    // arrive at the callback with `?token_hash=…&type=magiclink` (the
+    // implicit-flow shape). Pre-fix, the callback called
+    // exchangeCodeForSession on a missing `?code=` and broke every
+    // post-payment magic link with a "PKCE code verifier not found"
+    // error — what cost us a real customer's first impression.
+    mockVerifyOtp.mockResolvedValue({ error: null });
+    const GET = await loadGet();
+    const res = await GET(makeReq('/auth/callback?token_hash=tok123&type=magiclink'));
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost/dashboard');
+    expect(mockVerifyOtp).toHaveBeenCalledWith({
+      type: 'magiclink',
+      token_hash: 'tok123',
+    });
+    // exchangeCodeForSession must NOT fire on the OTP path.
+    expect(mockExchange).not.toHaveBeenCalled();
+  });
+
+  it('respects ?next on the magic-link (token_hash) path', async () => {
+    mockVerifyOtp.mockResolvedValue({ error: null });
+    const GET = await loadGet();
+    const res = await GET(
+      makeReq(
+        '/auth/callback?token_hash=tok123&type=magiclink&next=' +
+          encodeURIComponent('/get-quotes/claim?request=abc'),
+      ),
+    );
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe(
+      'http://localhost/get-quotes/claim?request=abc',
+    );
+  });
+
+  it('defaults type to magiclink when token_hash is present without a type', async () => {
+    // Older link formats may omit `type`; the only OTP type we
+    // generate today is magiclink (post-payment.ts), so the default
+    // is safe.
+    mockVerifyOtp.mockResolvedValue({ error: null });
+    const GET = await loadGet();
+    const res = await GET(makeReq('/auth/callback?token_hash=tok123'));
+    expect(res.status).toBe(307);
+    expect(mockVerifyOtp).toHaveBeenCalledWith({
+      type: 'magiclink',
+      token_hash: 'tok123',
+    });
   });
 
   it('respects a safe ?next relative path', async () => {

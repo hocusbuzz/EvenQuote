@@ -51,8 +51,17 @@ export default async function AdminRequestDetailPage({
 
   if (!request) notFound();
 
-  // Parallel: calls + quotes + user profile.
-  const [calls, quotes, profile] = await Promise.all([
+  // Parallel: calls + quotes + user profile + payments.
+  //
+  // payments is a separate table from quote_requests; the real Stripe
+  // webhook writes here, NOT to quote_requests.stripe_payment_id (that
+  // column is only set by the dev-trigger route for fake payments).
+  // Pre-2026-05-01 the Stripe display below read off
+  // quote_requests.stripe_payment_id and ALWAYS showed "—" for real
+  // paid requests, which read as "payment failed" to anyone glancing
+  // at the dashboard. Pulling the payments row gives the actual id +
+  // status.
+  const [calls, quotes, profile, payments] = await Promise.all([
     admin
       .from('calls')
       .select(
@@ -79,7 +88,31 @@ export default async function AdminRequestDetailPage({
           .eq('id', request.user_id)
           .maybeSingle()
       : Promise.resolve({ data: null }),
+    admin
+      .from('payments')
+      .select(
+        'stripe_payment_intent_id, stripe_session_id, status, amount, currency, created_at'
+      )
+      .eq('quote_request_id', id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
+
+  // Resolve a display-friendly Stripe identifier from whichever source
+  // is populated. Order of preference matches what's most useful for
+  // ops debugging — the payment_intent id is what Stripe Dashboard
+  // search expects; session_id is the next-best fallback; the legacy
+  // dev-trigger column is last.
+  const paymentRow = payments?.data ?? null;
+  const stripeDisplay: { kind: 'paid' | 'dev' | 'none'; id: string | null } =
+    paymentRow?.stripe_payment_intent_id
+      ? { kind: 'paid', id: paymentRow.stripe_payment_intent_id }
+      : paymentRow?.stripe_session_id
+        ? { kind: 'paid', id: paymentRow.stripe_session_id }
+        : request.stripe_payment_id?.startsWith('dev_trigger')
+          ? { kind: 'dev', id: request.stripe_payment_id }
+          : { kind: 'none', id: null };
 
   const sc = Array.isArray(request.service_categories)
     ? request.service_categories[0]
@@ -127,12 +160,22 @@ export default async function AdminRequestDetailPage({
             <div>
               <div className="text-muted-foreground">Stripe</div>
               <div className="text-foreground">
-                {request.stripe_payment_id
-                  ? request.stripe_payment_id.startsWith('dev_trigger')
-                    ? 'dev trigger'
-                    : 'paid'
-                  : '—'}
+                {stripeDisplay.kind === 'paid' ? (
+                  <span title={stripeDisplay.id ?? undefined}>paid</span>
+                ) : stripeDisplay.kind === 'dev' ? (
+                  'dev trigger'
+                ) : (
+                  '—'
+                )}
               </div>
+              {paymentRow?.amount !== undefined &&
+              paymentRow?.amount !== null &&
+              paymentRow?.currency ? (
+                <div className="text-[10px] text-muted-foreground">
+                  ${(paymentRow.amount / 100).toFixed(2)}{' '}
+                  {paymentRow.currency.toUpperCase()}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>

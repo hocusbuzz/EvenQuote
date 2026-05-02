@@ -47,6 +47,10 @@ function safeNext(raw: string | null): string {
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
+  const tokenHash = searchParams.get('token_hash');
+  // `type` is one of 'magiclink' | 'recovery' | 'invite' | 'email_change' |
+  // 'signup' — Supabase's verifyOtp accepts the union as a string.
+  const otpType = searchParams.get('type');
   const errorCode = searchParams.get('error');
   const errorDesc = searchParams.get('error_description');
   const next = safeNext(searchParams.get('next'));
@@ -58,7 +62,24 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (!code) {
+  // Two callback shapes land here:
+  //
+  //   1. Magic-link / OTP (server-initiated, e.g. post-payment): URL has
+  //      `?token_hash=…&type=magiclink`. Use verifyOtp — does NOT need a
+  //      PKCE code_verifier (which can't exist for server-initiated OTPs
+  //      because there was no preceding client-side auth call to stash
+  //      one). This is the path the post-payment magic link uses now
+  //      (post-payment.ts pins flowType:'implicit' on the OTP send).
+  //
+  //   2. OAuth / PKCE (client-initiated, e.g. Google sign-in): URL has
+  //      `?code=…`. Use exchangeCodeForSession — needs the
+  //      `code_verifier` cookie stashed by the SSR client when the user
+  //      kicked off the flow.
+  //
+  // We dispatch on which params are present. Prior to the May 2026 fix
+  // we only handled `code`, which broke every magic link with
+  // "PKCE code verifier not found in storage."
+  if (!code && !tokenHash) {
     const url = new URL('/auth-code-error', origin);
     url.searchParams.set('message', 'Missing authorization code');
     return NextResponse.redirect(url);
@@ -66,15 +87,27 @@ export async function GET(request: NextRequest) {
 
   const supabase = await createClient();
 
-  // Wrap the exchange so both the error-object path AND a transport
-  // throw land on the same capture site. A future Supabase SDK change
-  // that starts throwing instead of returning { error } would otherwise
-  // fall through to the Next.js error boundary — no Sentry tags, no
-  // structured signal, just a 500 on the magic-link landing page.
+  // Wrap the verify/exchange so both the error-object path AND a
+  // transport throw land on the same capture site. A future Supabase
+  // SDK change that starts throwing instead of returning { error }
+  // would otherwise fall through to the Next.js error boundary — no
+  // Sentry tags, no structured signal, just a 500 on the landing page.
   let exchangeError: { message?: string } | null = null;
   try {
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    exchangeError = error ?? null;
+    if (tokenHash) {
+      // Magic link / email OTP path. `type` may be missing on
+      // older link formats — default to 'magiclink' (the only type
+      // we generate today from post-payment.ts).
+      const { error } = await supabase.auth.verifyOtp({
+        type: (otpType as 'magiclink') || 'magiclink',
+        token_hash: tokenHash,
+      });
+      exchangeError = error ?? null;
+    } else if (code) {
+      // OAuth / PKCE path.
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      exchangeError = error ?? null;
+    }
   } catch (thrown) {
     exchangeError = thrown instanceof Error ? { message: thrown.message } : { message: String(thrown) };
   }

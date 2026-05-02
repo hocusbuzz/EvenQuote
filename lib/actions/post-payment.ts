@@ -16,7 +16,7 @@
 //   Marking it 'use server' is harmless and future-proofs if we ever
 //   want to invoke it from a client retry button.
 
-import { createAdminClient } from '@/lib/supabase/admin';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { headers } from 'next/headers';
 import { captureException } from '@/lib/observability/sentry';
 
@@ -74,7 +74,42 @@ export async function sendPaymentMagicLink(input: MagicLinkInput): Promise<void>
     throw new Error('sendPaymentMagicLink: email and requestId required');
   }
 
-  const admin = createAdminClient();
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) {
+    throw new Error(
+      'sendPaymentMagicLink: missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY',
+    );
+  }
+
+  // ── flowType: 'implicit' is load-bearing here ──
+  //
+  // The shared admin client (lib/supabase/admin.ts) inherits the SDK's
+  // default flowType of 'pkce'. With PKCE, signInWithOtp generates a
+  // magic-link URL of the form `?code=…` AND requires a `code_verifier`
+  // to be stored in browser cookies — generated client-side on a
+  // PRECEDING auth call. But this magic link is dispatched from a
+  // SERVER context (the Stripe webhook): there is no browser session
+  // yet, no preceding client-side auth call, and therefore no
+  // verifier in cookies. The user clicks the link, the callback
+  // calls `exchangeCodeForSession(code)`, Supabase looks for the
+  // verifier, finds nothing, and returns
+  // "PKCE code verifier not found in storage" — what cost us a real
+  // paying customer's first impression on 2026-05-01.
+  //
+  // The 'implicit' flow generates a `?token_hash=…&type=magiclink`
+  // URL that the callback verifies via `verifyOtp({type, token_hash})`
+  // with no client-side state required. Correct shape for
+  // server-initiated magic links. The auth/callback route handles
+  // both URL formats so this stays robust across SDK changes.
+  const oneShot = createSupabaseClient(url, serviceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      flowType: 'implicit',
+    },
+  });
+
   const siteUrl = getSiteUrl();
 
   // The "next" landing after callback = the claim route, which does
@@ -84,7 +119,7 @@ export async function sendPaymentMagicLink(input: MagicLinkInput): Promise<void>
   const next = `/get-quotes/claim?request=${encodeURIComponent(requestId)}`;
   const emailRedirectTo = `${siteUrl}/auth/callback?next=${encodeURIComponent(next)}`;
 
-  const { error } = await admin.auth.signInWithOtp({
+  const { error } = await oneShot.auth.signInWithOtp({
     email,
     options: {
       emailRedirectTo,
