@@ -48,6 +48,8 @@ import { captureException, captureMessage } from '@/lib/observability/sentry';
 import { sendEmail } from '@/lib/email/resend';
 import { trackServer } from '@/lib/analytics/track-server';
 import type { AnalyticsEventParams } from '@/lib/analytics/events';
+import { renderCallsScheduled } from '@/lib/email/templates';
+import { resolveTimezoneFromState } from '@/lib/scheduling/business-hours';
 
 const log = createLogger('stripe/webhook');
 
@@ -382,8 +384,14 @@ async function runPostPaymentSideEffects(args: {
   }
 
   // ── C. Enqueue Vapi calls ───────────────────────────────────────
+  // Tracks the result so the deferred-confirmation email step (D)
+  // below knows whether enqueue deferred + when. Initialized to null
+  // so a thrown enqueue (caught below) leaves the deferred-email
+  // step a clean no-op.
+  let enqResult: Awaited<ReturnType<typeof enqueueQuoteCalls>> | null = null;
   try {
     const enq = await enqueueQuoteCalls({ quoteRequestId: requestId });
+    enqResult = enq;
 
     // R47.5: handle the {ok:true, advanced:false} soft-failure case.
     //
@@ -464,6 +472,106 @@ async function runPostPaymentSideEffects(args: {
     captureException(err, {
       tags: { route: 'stripe/webhook', site: 'enqueue-calls', requestId },
     });
+  }
+
+  // ── C2. Deferred-dispatch confirmation email (#117 + 2026-05-01) ──
+  // When enqueueQuoteCalls deferred to local business hours, the
+  // customer paid but won't see calls happening for hours. Without a
+  // proactive email they're left with just the Stripe receipt + the
+  // magic-link email — neither of which says "your calls are
+  // scheduled for X." A real customer (San Marcos handyman,
+  // 2026-05-01) read the magic-link email as "your quotes are ready"
+  // because nothing else explained the gap.
+  //
+  // We send this AFTER the enqueue try/catch so a thrown enqueue
+  // doesn't trigger the email (no scheduled time to communicate).
+  // Detection: the deferred branch returns shape
+  //   { ok:true, advanced:true, enqueued:0, scheduledFor:string, note }
+  // — `scheduledFor` is the discriminator (the immediate-dispatch
+  // branch doesn't have it).
+  if (
+    contactEmail &&
+    enqResult &&
+    enqResult.ok &&
+    'scheduledFor' in enqResult &&
+    typeof enqResult.scheduledFor === 'string'
+  ) {
+    try {
+      const adminForName = createAdminClient();
+      // Pull the recipient name + service-area state for the template.
+      // The state for tz lookup is on quote_requests already; we
+      // re-read intake_data for contact_name (could thread it from
+      // the outer scope, but the row is small and this keeps the
+      // dependency local).
+      const { data: row } = await adminForName
+        .from('quote_requests')
+        .select(
+          'city, state, intake_data, service_categories ( name )'
+        )
+        .eq('id', requestId)
+        .maybeSingle();
+
+      type IntakeShape = { contact_name?: string };
+      const intakeShape = (row?.intake_data ?? {}) as IntakeShape;
+      type CategoryRel = { name?: string } | null;
+      const catRow = (row as { service_categories?: CategoryRel | CategoryRel[] } | null)
+        ?.service_categories;
+      const categoryName = Array.isArray(catRow)
+        ? (catRow[0]?.name ?? 'Service')
+        : (catRow?.name ?? 'Service');
+
+      const tz = row?.state
+        ? resolveTimezoneFromState(row.state)
+        : 'America/Los_Angeles';
+
+      const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://evenquote.com'}/get-quotes/success?request=${encodeURIComponent(requestId)}`;
+
+      const rendered = renderCallsScheduled({
+        recipientName: intakeShape.contact_name ?? null,
+        city: row?.city ?? '',
+        state: row?.state ?? '',
+        categoryName,
+        scheduledForIso: enqResult.scheduledFor,
+        serviceAreaTz: tz,
+        dashboardUrl,
+      });
+
+      const send = await sendEmail({
+        to: contactEmail,
+        subject: rendered.subject,
+        html: rendered.html,
+        text: rendered.text,
+        tag: 'calls-scheduled',
+      });
+
+      if (!send.ok) {
+        log.error('calls-scheduled email send failed', {
+          requestId,
+          err: send.error,
+        });
+        captureException(new Error(`calls-scheduled email: ${send.error}`), {
+          tags: {
+            route: 'stripe/webhook',
+            site: 'calls-scheduled-email',
+            requestId,
+          },
+        });
+      } else {
+        log.info('calls-scheduled email sent', {
+          requestId,
+          scheduledFor: enqResult.scheduledFor,
+        });
+      }
+    } catch (err) {
+      log.error('calls-scheduled email step threw', { err, requestId });
+      captureException(err, {
+        tags: {
+          route: 'stripe/webhook',
+          site: 'calls-scheduled-email',
+          requestId,
+        },
+      });
+    }
   }
 
   // ── D. Analytics: quote_request_paid (server-side backstop) ─────

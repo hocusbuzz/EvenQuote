@@ -9,8 +9,10 @@ import { describe, it, expect } from 'vitest';
 import {
   renderQuoteReport,
   renderContactRelease,
+  renderCallsScheduled,
   type QuoteReportInput,
   type ContactReleaseInput,
+  type CallsScheduledInput,
 } from './templates';
 
 function baseQuoteInput(
@@ -348,5 +350,99 @@ describe('renderContactRelease', () => {
     expect(out.html).toContain('4-bed house');
     expect(out.html).toContain('Piano');
     expect(out.text).toContain('• 4-bed house');
+  });
+});
+
+// ─── renderCallsScheduled ──────────────────────────────────────────
+//
+// The deferred-dispatch confirmation email (#117 + 2026-05-01 incident).
+// Subject + body must be unambiguous about WHEN the calls will happen
+// — silence + a magic-link email read as "calls broken" in the real
+// customer test that motivated this template.
+
+describe('renderCallsScheduled', () => {
+  function baseScheduledInput(
+    overrides: Partial<CallsScheduledInput> = {},
+  ): CallsScheduledInput {
+    return {
+      recipientName: 'Pat',
+      city: 'San Marcos',
+      state: 'CA',
+      categoryName: 'Handyman',
+      // Monday 9 AM Pacific = 16:00 UTC
+      scheduledForIso: '2026-05-04T16:00:00Z',
+      serviceAreaTz: 'America/Los_Angeles',
+      dashboardUrl: 'https://evenquote.com/get-quotes/success?request=req-abc',
+      ...overrides,
+    };
+  }
+
+  it('subject explicitly states the scheduled time so it cannot be misread as "ready"', () => {
+    const out = renderCallsScheduled(baseScheduledInput());
+    // The May 2026 incident: customer read magic-link email as "your
+    // quotes are ready". Subject must say "calls start <time>" so a
+    // glance at the inbox is not ambiguous.
+    expect(out.subject.toLowerCase()).toContain('calls start');
+    expect(out.subject.toLowerCase()).toContain('queued');
+    expect(out.subject.toLowerCase()).toContain('handyman');
+  });
+
+  it('renders the scheduled time in the SERVICE-AREA timezone, not UTC', () => {
+    const out = renderCallsScheduled(baseScheduledInput());
+    // 2026-05-04T16:00:00Z = Monday 9:00 AM PDT (Pacific is UTC-7 in May).
+    expect(out.html).toContain('Monday');
+    expect(out.html).toContain('9:00');
+    expect(out.html.toUpperCase()).toContain('PDT');
+    // Must NOT just dump the UTC ISO string at the customer.
+    expect(out.html).not.toContain('2026-05-04T16:00:00Z');
+  });
+
+  it('mentions the $9.99 went through (acknowledge the payment)', () => {
+    const out = renderCallsScheduled(baseScheduledInput());
+    expect(out.html).toContain('$9.99');
+    expect(out.text).toContain('$9.99');
+  });
+
+  it('explains WHY we are deferring (not just "we are deferring")', () => {
+    const out = renderCallsScheduled(baseScheduledInput());
+    // Customers should understand this is a quality/respect choice,
+    // not a system limitation.
+    expect(out.html.toLowerCase()).toContain('business hours');
+  });
+
+  it('includes the dashboard link in HTML and text', () => {
+    const url = 'https://evenquote.com/get-quotes/success?request=req-xyz';
+    const out = renderCallsScheduled(baseScheduledInput({ dashboardUrl: url }));
+    expect(out.html).toContain(url);
+    expect(out.text).toContain(url);
+  });
+
+  it('handles missing recipientName (guest checkout) without crashing', () => {
+    const out = renderCallsScheduled(
+      baseScheduledInput({ recipientName: null }),
+    );
+    expect(out.html).toContain('Hi,');
+    expect(out.text.startsWith('Hi,')).toBe(true);
+  });
+
+  it('HTML-escapes city/state to block injection through intake_data', () => {
+    const out = renderCallsScheduled(
+      baseScheduledInput({ city: '<script>x</script>' }),
+    );
+    expect(out.html).not.toContain('<script>x</script>');
+    expect(out.html).toContain('&lt;script&gt;x&lt;/script&gt;');
+  });
+
+  it('renders a different timezone correctly when state is in the eastern zone', () => {
+    // Same UTC instant in NYC = 12:00 PM EDT (UTC-4 in May).
+    const out = renderCallsScheduled(
+      baseScheduledInput({
+        state: 'NY',
+        city: 'Brooklyn',
+        serviceAreaTz: 'America/New_York',
+      }),
+    );
+    expect(out.html).toContain('12:00');
+    expect(out.html.toUpperCase()).toContain('EDT');
   });
 });

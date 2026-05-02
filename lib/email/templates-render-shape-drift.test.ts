@@ -113,9 +113,11 @@ describe('email/templates render-shape drift (R42)', () => {
     'QuoteReportInput',
     'ContactReleaseInput',
     'StuckRequestRow',
+    'CallsScheduledInput',
     'renderQuoteReport',
     'renderContactRelease',
     'renderStuckRequestsAlert',
+    'renderCallsScheduled',
   ]);
 
   it('exports exactly the expected surface (no helper leaks)', () => {
@@ -438,16 +440,17 @@ describe('email/templates render-shape drift (R42)', () => {
     expect(count, 'button() invocation count drifted').toBeLessThanOrEqual(2);
   });
 
-  // (15) Coverage tripwire: if someone adds a 3rd renderer to
+  // (15) Coverage tripwire: if someone adds a new renderer to
   // templates.ts, they must update (1)'s EXPECTED_EXPORTS + add a
   // functional test in templates.test.ts. This test forces the issue.
-  it('renderer count is exactly 3 (tripwire for future additions)', () => {
+  it('renderer set is exactly the expected list (tripwire for future additions)', () => {
     const names = extractExportedNames(TEMPLATES_SRC);
     const renderers = [...names].filter((n) => n.startsWith('render'));
     expect(
       renderers.sort(),
       'renderer count drifted — update EXPECTED_EXPORTS and add a functional test',
     ).toEqual([
+      'renderCallsScheduled',
       'renderContactRelease',
       'renderQuoteReport',
       'renderStuckRequestsAlert',

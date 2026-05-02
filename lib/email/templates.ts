@@ -433,6 +433,114 @@ export type ContactReleaseInput = {
   quoteSummary: string;
 };
 
+// ─── Calls scheduled (#117 deferral confirmation) ──────────────────
+//
+// Sent immediately after a paid request that landed OUTSIDE the
+// service area's local business hours (Mon-Fri 9-4:30 PM). Without
+// it, the customer pays $9.99, gets a Stripe receipt + a magic-link
+// email, and then sits in silence for hours until the calls actually
+// happen — easy to read as "this is broken." A real customer (San
+// Marcos handyman, 2026-05-01) hit exactly this confusion.
+//
+// Copy goals:
+//   • Acknowledge payment landed
+//   • State the SPECIFIC dispatch time in service-area local time
+//     (matches what the success page shows; consistent two surfaces)
+//   • Set the expectation: ~60-90 min from dispatch to report email
+//   • Direct link to the dashboard so they can come back and watch
+// PII-friendly: no quotes data on this surface yet (there are none).
+
+export type CallsScheduledInput = {
+  recipientName?: string | null;
+  city: string;
+  state: string;            // 2-letter US state code
+  categoryName: string;     // 'Handyman', 'Cleaning', etc.
+  scheduledForIso: string;  // ISO timestamp, e.g. '2026-05-04T16:00:00Z'
+  /**
+   * IANA timezone for the service area, e.g. 'America/Los_Angeles'.
+   * Resolved by the caller so this template stays free of the
+   * state→tz lookup table (which lives in lib/scheduling/).
+   */
+  serviceAreaTz: string;
+  /** Where the customer can come back to watch progress. */
+  dashboardUrl: string;
+};
+
+export function renderCallsScheduled(input: CallsScheduledInput): Rendered {
+  const greeting = input.recipientName ? `Hi ${escapeHtml(input.recipientName)},` : 'Hi,';
+  const lowerCat = input.categoryName.toLowerCase();
+
+  const when = new Date(input.scheduledForIso);
+  // "Monday at 9:00 AM PDT" — service-area local time so it matches
+  // the success page rendering, NOT the customer's browser tz (which
+  // we don't know server-side anyway).
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: input.serviceAreaTz,
+    weekday: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  });
+  const whenPretty = fmt.format(when);
+
+  const subject = `Your ${lowerCat} request is queued — calls start ${whenPretty}`;
+
+  const inner = `
+    <p style="font-size:16px; margin:0 0 12px 0;">${greeting}</p>
+    <p style="font-size:15px; margin:0 0 16px 0; color:#374151;">
+      Your $9.99 went through and your ${escapeHtml(lowerCat)} request for
+      ${escapeHtml(input.city)}, ${escapeHtml(input.state)} is in the queue.
+    </p>
+    <p style="font-size:15px; margin:0 0 16px 0; color:#374151;">
+      Right now it&rsquo;s outside local business hours where the work will
+      happen, so calling pros now would either go to voicemail or annoy
+      them — neither helps you. We&rsquo;ll start dialing on your behalf
+      <strong>${escapeHtml(whenPretty)}</strong>.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e5e5e5; border-radius:8px; margin:20px 0;">
+      <tr>
+        <td style="padding:18px 20px;">
+          <div style="font-weight:700; margin-bottom:10px;">What happens next</div>
+          <ul style="font-size:14px; color:#374151; margin:0 0 0 20px; padding:0;">
+            <li style="margin-bottom:6px;">We dial up to 5 local ${escapeHtml(lowerCat)} pros once the window opens.</li>
+            <li style="margin-bottom:6px;">Most calls finish in 60-90 minutes.</li>
+            <li>You get a clean comparison report in this inbox right after.</li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+    ${button('Watch progress', input.dashboardUrl)}
+    <p style="font-size:13px; color:#6b7280; margin-top:24px;">
+      Nothing for you to do — sit tight. If you don&rsquo;t hear from us by
+      a few hours after the scheduled time, reply to this email.
+    </p>
+  `;
+
+  const text = [
+    greeting,
+    ``,
+    `Your $9.99 went through and your ${lowerCat} request for ${input.city}, ${input.state} is in the queue.`,
+    ``,
+    `Right now it's outside local business hours where the work will happen — calling now would mean voicemail or annoyed pros. We'll start dialing on your behalf ${whenPretty}.`,
+    ``,
+    `What happens next:`,
+    `  • We dial up to 5 local ${lowerCat} pros once the window opens.`,
+    `  • Most calls finish in 60-90 minutes.`,
+    `  • You get a clean comparison report in this inbox right after.`,
+    ``,
+    `Watch progress: ${input.dashboardUrl}`,
+    ``,
+    `Nothing for you to do — sit tight. If you don't hear from us by a few hours after the scheduled time, reply to this email.`,
+  ].join('\n');
+
+  return {
+    subject,
+    html: htmlShell(inner),
+    text,
+  };
+}
+
 export function renderContactRelease(input: ContactReleaseInput): Rendered {
   const subject = `${escapeHtml(input.customerName)} wants to follow up on your ${input.categoryName.toLowerCase()} quote`;
 
