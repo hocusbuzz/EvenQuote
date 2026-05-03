@@ -23,6 +23,7 @@ import { LawnCareFormShell } from '@/components/get-quotes/lawn-care-form-shell'
 import { JunkRemovalFormShell } from '@/components/get-quotes/junk-removal-form-shell';
 import { WaitlistCapture } from '@/components/get-quotes/waitlist-capture';
 import { UtmCapture } from '@/components/get-quotes/utm-capture';
+import { JsonLd } from '@/lib/seo/json-ld';
 
 // Force per-request SSR. Without this, Next.js may statically generate the
 // page at build time. If the build sandbox can't reach Supabase, the
@@ -77,8 +78,44 @@ export default async function CategoryIntakePage({
   const live = params.category in LIVE_FORMS;
   const Shell = LIVE_FORMS[params.category];
 
+  // Per-vertical Service + Offer JSON-LD. Each vertical's URL becomes
+  // an indexed Service page that Google can render with rich price /
+  // availability annotations. Live verticals get the real $9.99 offer
+  // node; waitlist-only verticals omit it (no service to sell yet —
+  // promising one would be misleading to crawlers + searchers).
+  //
+  // Schema docs: https://schema.org/Service, https://schema.org/Offer
+  // Google rich-result reference:
+  //   https://developers.google.com/search/docs/appearance/structured-data/local-business
+  const serviceSchema: Record<string, unknown> = {
+    '@context': 'https://schema.org',
+    '@type': 'Service',
+    name: `${category.name} quote collection`,
+    description:
+      category.description ??
+      `We dial up to 5 local ${category.name.toLowerCase()} pros and email a clean comparison report — price, availability, and scope from each — within 60-90 minutes.`,
+    serviceType: `${category.name} quote collection`,
+    provider: {
+      '@type': 'Organization',
+      name: 'EvenQuote',
+      url: 'https://evenquote.com',
+    },
+    areaServed: { '@type': 'Country', name: 'United States' },
+    url: `https://evenquote.com/get-quotes/${params.category}`,
+  };
+  if (live) {
+    serviceSchema.offers = {
+      '@type': 'Offer',
+      price: '9.99',
+      priceCurrency: 'USD',
+      availability: 'https://schema.org/InStock',
+      url: `https://evenquote.com/get-quotes/${params.category}`,
+    };
+  }
+
   return (
     <>
+      <JsonLd data={serviceSchema as Record<string, never>} />
       <SiteNavbar />
       <UtmCapture />
       <main className="container max-w-2xl py-12 sm:py-16">

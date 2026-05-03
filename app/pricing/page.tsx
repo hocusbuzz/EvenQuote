@@ -19,6 +19,7 @@ import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
 import { Pricing } from '@/components/site/pricing';
 import { Button } from '@/components/ui/button';
+import { JsonLd } from '@/lib/seo/json-ld';
 import {
   Accordion,
   AccordionContent,
@@ -72,9 +73,45 @@ const pricingFaqs: Array<{ q: string; a: string }> = [
   },
 ];
 
+// Product + Offer JSON-LD. Tells Google "this page describes a product
+// available for $9.99 USD." Eligible for the Product/Offer rich-result
+// treatment in SERP — depending on Google's discretion the listing can
+// show price + availability inline below the title, which lifts CTR
+// vs an unannotated organic listing. The price node is what powers
+// "from $9.99" in some snippets.
+//
+// Schema docs: https://schema.org/Product, https://schema.org/Offer
+// Google rich-result reference:
+//   https://developers.google.com/search/docs/appearance/structured-data/product
+const pricingProductSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'Product',
+  name: 'EvenQuote Quote Collection',
+  description:
+    'We dial up to 5 local pros for you and email a clean comparison report — price, availability, and scope from each — within 60-90 minutes. One flat fee per request.',
+  brand: { '@type': 'Brand', name: 'EvenQuote' },
+  // Product image — reuse the OG image so the rich-result thumbnail
+  // is on-brand without a separate asset.
+  image: 'https://evenquote.com/og-image.png',
+  offers: {
+    '@type': 'Offer',
+    price: '9.99',
+    priceCurrency: 'USD',
+    availability: 'https://schema.org/InStock',
+    url: 'https://evenquote.com/get-quotes',
+    // Honest seller — mirrors the Organization schema in layout.tsx.
+    seller: {
+      '@type': 'Organization',
+      name: 'EvenQuote',
+      url: 'https://evenquote.com',
+    },
+  },
+};
+
 export default function PricingPage() {
   return (
     <>
+      <JsonLd data={pricingProductSchema} />
       <SiteNavbar />
       <main>
         {/* Hero — restate the price up top so the URL pays off
