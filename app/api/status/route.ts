@@ -2,8 +2,9 @@
 //
 // Deeper companion to /api/health. While /health only answers "is the
 // web tier alive and can it talk to its DB?", /status exercises the
-// paid integrations we depend on — Stripe and Vapi — to catch silent
-// rot (e.g., a rotated/expired API key that health doesn't detect).
+// paid integrations we depend on — Stripe, Vapi, and Resend — to
+// catch silent rot (e.g., a rotated/expired API key that health
+// doesn't detect).
 //
 // NOT public. Gated by the same CRON_SECRET the other scheduled jobs
 // use. The expected caller is an uptime monitor running on a 5-10 min
@@ -11,10 +12,10 @@
 // crawler probing Stripe's API on our behalf.
 //
 // Response shape (200):
-//   { ok: true, checked_at, checks: { stripe: 'ok', vapi: 'ok' } }
+//   { ok: true, checked_at, checks: { stripe: 'ok', vapi: 'ok', resend: 'ok' } }
 // Degraded (503):
 //   { ok: false, checked_at,
-//     checks: { stripe: 'ok', vapi: 'fail' },
+//     checks: { stripe: 'ok', vapi: 'fail', resend: 'ok' },
 //     errors: { vapi: '<short message>' } }
 //
 // Design notes:
@@ -46,6 +47,7 @@ export type StatusResponse = {
   checks: {
     stripe: CheckOutcome;
     vapi: CheckOutcome;
+    resend: CheckOutcome;
   };
   errors?: Record<string, string>;
 };
@@ -113,23 +115,76 @@ export async function checkVapi(): Promise<{ outcome: CheckOutcome; message?: st
   }
 }
 
+/**
+ * Exercise Resend by hitting its `/domains` endpoint — the lightest
+ * authenticated GET that confirms (a) the API key is alive, (b) the
+ * key has the right scope to read its own resources. We do NOT send
+ * a real email here — that would burn quota and hit the rate limit
+ * if scheduled tightly. Returns 'skip' when RESEND_API_KEY is unset.
+ *
+ * Catches the silent failure mode where a rotated/revoked key would
+ * otherwise only surface when send-reports tries to email a customer
+ * — by which point the customer has paid $9.99 and the report sits
+ * in the outbox.
+ *
+ * Exported for testing.
+ */
+export async function checkResend(): Promise<{ outcome: CheckOutcome; message?: string }> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return { outcome: 'skip' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CHECK_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.resend.com/domains', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const short = `HTTP ${res.status}`;
+      log.error('resend check non-2xx', { status: res.status });
+      return { outcome: 'fail', message: short };
+    }
+    return { outcome: 'ok' };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message.slice(0, 200) : 'unknown error';
+    log.error('resend check threw', { err: message });
+    return { outcome: 'fail', message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function handle(req: Request) {
   const deny = assertCronAuth(req);
   if (deny) return deny;
 
-  // Run both probes in parallel — they're independent, and /status
-  // should not take longer than the slower of the two.
-  const [stripe, vapi] = await Promise.all([checkStripe(), checkVapi()]);
+  // Run all probes in parallel — they're independent, and /status
+  // should not take longer than the slowest of the three.
+  const [stripe, vapi, resend] = await Promise.all([
+    checkStripe(),
+    checkVapi(),
+    checkResend(),
+  ]);
 
   const errors: Record<string, string> = {};
   if (stripe.outcome === 'fail' && stripe.message) errors.stripe = stripe.message;
   if (vapi.outcome === 'fail' && vapi.message) errors.vapi = vapi.message;
+  if (resend.outcome === 'fail' && resend.message) errors.resend = resend.message;
 
-  const anyFail = stripe.outcome === 'fail' || vapi.outcome === 'fail';
+  const anyFail =
+    stripe.outcome === 'fail' ||
+    vapi.outcome === 'fail' ||
+    resend.outcome === 'fail';
   const body: StatusResponse = {
     ok: !anyFail,
     checked_at: new Date().toISOString(),
-    checks: { stripe: stripe.outcome, vapi: vapi.outcome },
+    checks: {
+      stripe: stripe.outcome,
+      vapi: vapi.outcome,
+      resend: resend.outcome,
+    },
     ...(Object.keys(errors).length > 0 ? { errors } : {}),
   };
 

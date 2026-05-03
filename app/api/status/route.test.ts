@@ -101,7 +101,12 @@ describe('/api/status — happy path', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.checks).toEqual({ stripe: 'ok', vapi: 'ok' });
+    // Resend is 'skip' here because RESEND_API_KEY isn't set in this
+    // test's env. Stripe + Vapi are mocked via the SDK + global fetch
+    // so they actually run. The 'skip' on Resend confirms the new
+    // probe respects the same unconfigured-env semantics as the
+    // others (preview envs without keys must not page).
+    expect(body.checks).toEqual({ stripe: 'ok', vapi: 'ok', resend: 'skip' });
     expect(body.errors).toBeUndefined();
     expect(typeof body.checked_at).toBe('string');
   });
@@ -230,7 +235,11 @@ describe('/api/status — skip when unconfigured', () => {
     const res = await GET(req);
     expect(res.status).toBe(200); // skip ≠ fail
     const body = await res.json();
-    expect(body.checks).toEqual({ stripe: 'skip', vapi: 'skip' });
+    expect(body.checks).toEqual({
+      stripe: 'skip',
+      vapi: 'skip',
+      resend: 'skip',
+    });
     expect(stripeSpy).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });

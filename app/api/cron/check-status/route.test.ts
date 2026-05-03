@@ -1,17 +1,20 @@
 // Tests for /api/cron/check-status — the cron-friendly companion
 // to /api/status.
 //
-// We mock the underlying probes (checkStripe / checkVapi from the
-// status route) so the tests are pure and don't try to dial Stripe.
+// We mock the underlying probes (checkStripe / checkVapi / checkResend
+// from the status route) so the tests are pure and don't try to dial
+// the live integrations.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const mockCheckStripe = vi.fn();
 const mockCheckVapi = vi.fn();
+const mockCheckResend = vi.fn();
 
 vi.mock('@/app/api/status/route', () => ({
   checkStripe: () => mockCheckStripe(),
   checkVapi: () => mockCheckVapi(),
+  checkResend: () => mockCheckResend(),
 }));
 
 const env = process.env as Record<string, string | undefined>;
@@ -33,6 +36,11 @@ describe('/api/cron/check-status', () => {
     vi.resetModules();
     mockCheckStripe.mockReset();
     mockCheckVapi.mockReset();
+    mockCheckResend.mockReset();
+    // Default Resend to 'ok' so existing tests that only set Stripe
+    // and Vapi keep their original semantics. Tests that exercise
+    // Resend explicitly override.
+    mockCheckResend.mockResolvedValue({ outcome: 'ok' });
     env.CRON_SECRET = 'cron_test_secret';
   });
 
@@ -77,7 +85,7 @@ describe('/api/cron/check-status', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.checks).toEqual({ stripe: 'ok', vapi: 'ok' });
+    expect(body.checks).toEqual({ stripe: 'ok', vapi: 'ok', resend: 'ok' });
     expect(body.errors).toBeUndefined();
   });
 
@@ -267,6 +275,11 @@ describe('captureException tag shape — cron/check-status', () => {
     vi.resetModules();
     mockCheckStripe.mockReset();
     mockCheckVapi.mockReset();
+    mockCheckResend.mockReset();
+    // Default Resend to 'ok' so existing tests that only set Stripe
+    // and Vapi keep their original semantics. Tests that exercise
+    // Resend explicitly override.
+    mockCheckResend.mockResolvedValue({ outcome: 'ok' });
     env.CRON_SECRET = 'cron_test_secret';
   });
 
@@ -293,6 +306,7 @@ describe('captureException tag shape — cron/check-status', () => {
         reason: 'integrationProbeFailed',
         stripe: 'fail',
         vapi: 'ok',
+        resend: 'ok',
       },
     });
     // PII guard — tag values are literal outcome strings, never contact

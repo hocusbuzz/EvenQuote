@@ -12,21 +12,21 @@
 //     JSON breakdown. It returns 503 only when *probes failed* — the
 //     'skip' outcome (env not configured) is treated as healthy.
 //   • This route is the "wake me up if something's broken" endpoint.
-//     It applies the same Stripe + Vapi probes but returns a TINY,
-//     boring JSON body so the cron history is grep-able, and never
-//     returns 503 from a 'skip' outcome (preview envs without keys
-//     would page forever).
+//     It applies the same Stripe + Vapi + Resend probes but returns
+//     a TINY, boring JSON body so the cron history is grep-able, and
+//     never returns 503 from a 'skip' outcome (preview envs without
+//     keys would page forever).
 //
 // Auth: shared CRON_SECRET, same as the other /api/cron/* routes.
 //
 // Response shapes:
-//   200 { ok: true,  checks: { stripe: 'ok'|'skip', vapi: 'ok'|'skip' } }
-//   503 { ok: false, checks: { stripe: 'fail', vapi: 'ok' }, errors: { stripe: '<short>' } }
+//   200 { ok: true,  checks: { stripe: 'ok'|'skip', vapi: 'ok'|'skip', resend: 'ok'|'skip' } }
+//   503 { ok: false, checks: { stripe: 'fail', vapi: 'ok', resend: 'ok' }, errors: { stripe: '<short>' } }
 //   401 { ok: false, error: 'unauthorized' }
 //   500 { ok: false, error: 'CRON_SECRET not configured' }
 
 import { NextResponse } from 'next/server';
-import { checkStripe, checkVapi } from '@/app/api/status/route';
+import { checkStripe, checkVapi, checkResend } from '@/app/api/status/route';
 import { createLogger } from '@/lib/logger';
 import { assertCronAuth } from '@/lib/security/cron-auth';
 import { captureException } from '@/lib/observability/sentry';
@@ -40,31 +40,40 @@ async function handle(req: Request) {
   const deny = assertCronAuth(req);
   if (deny) return deny;
 
-  const [stripe, vapi] = await Promise.all([checkStripe(), checkVapi()]);
+  const [stripe, vapi, resend] = await Promise.all([
+    checkStripe(),
+    checkVapi(),
+    checkResend(),
+  ]);
 
   const errors: Record<string, string> = {};
   if (stripe.outcome === 'fail' && stripe.message) errors.stripe = stripe.message;
   if (vapi.outcome === 'fail' && vapi.message) errors.vapi = vapi.message;
+  if (resend.outcome === 'fail' && resend.message) errors.resend = resend.message;
 
-  const anyFail = stripe.outcome === 'fail' || vapi.outcome === 'fail';
+  const anyFail =
+    stripe.outcome === 'fail' ||
+    vapi.outcome === 'fail' ||
+    resend.outcome === 'fail';
   if (anyFail) {
     // Log loudly so the failure shows up in Vercel logs *and* in the
     // cron failure email body once Vercel surfaces a non-2xx run.
     log.error('integration check failed', {
       stripe: stripe.outcome,
       vapi: vapi.outcome,
+      resend: resend.outcome,
       errors,
     });
     // Route to Sentry with the canonical `{ route }` tag shape used by
     // the other /api/cron/* handlers. We synthesize a new Error because
     // `fail` probes don't throw — they return structured outcomes.
     // Including the failing integration in tags lets on-call filter
-    // by surface (stripe vs. vapi) without grepping the message body.
-    // PII-safe: the outcome strings are 'ok'|'skip'|'fail' literals,
-    // not contact data, so forwarding them as tags is safe.
+    // by surface (stripe vs. vapi vs. resend) without grepping the
+    // message body. PII-safe: the outcome strings are 'ok'|'skip'|'fail'
+    // literals, not contact data, so forwarding them as tags is safe.
     captureException(
       new Error(
-        `cron/check-status: integration probe failed — stripe=${stripe.outcome} vapi=${vapi.outcome}`
+        `cron/check-status: integration probe failed — stripe=${stripe.outcome} vapi=${vapi.outcome} resend=${resend.outcome}`
       ),
       {
         tags: {
@@ -72,6 +81,7 @@ async function handle(req: Request) {
           reason: 'integrationProbeFailed',
           stripe: stripe.outcome,
           vapi: vapi.outcome,
+          resend: resend.outcome,
         },
       }
     );
@@ -80,7 +90,11 @@ async function handle(req: Request) {
   return NextResponse.json(
     {
       ok: !anyFail,
-      checks: { stripe: stripe.outcome, vapi: vapi.outcome },
+      checks: {
+        stripe: stripe.outcome,
+        vapi: vapi.outcome,
+        resend: resend.outcome,
+      },
       ...(Object.keys(errors).length > 0 ? { errors } : {}),
     },
     {
