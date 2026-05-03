@@ -15,13 +15,21 @@ recipe-following, not for being clever.
 | [vapi-call-timed-out.md](./vapi-call-timed-out.md) | Quote requests stuck in `calling` long past their SLA, or per-business calls in `failed`/`no_answer` storm. |
 | [supabase-503.md](./supabase-503.md) | `/api/health` returns 503. Site appears up but every server action throws. |
 | [resend-bounced.md](./resend-bounced.md) | Reports aren't landing in inboxes. Customers complain they never received their quote report. |
+| [admin-actions.md](./admin-actions.md) | Reference for the six one-click buttons on `/admin/requests/<id>`. Which to click for which symptom, what's safe to double-click, decision tree. |
 
 ## When in doubt
 
 1. Check `/api/health` and `/api/status` first. They tell you whether
    it's the DB (`/health`) or the paid integrations (`/status`).
-2. Check Vercel cron failure history — `check-status` is scheduled to
-   ping every 10 min; a red line on its run history is your timeline.
+2. Check the cron failure history in Supabase SQL editor (the
+   `check-status` job pings every 15 min via pg_cron — a red line on
+   its run history is your timeline):
+   ```sql
+   select jobname, status, return_message, start_time
+   from private.evenquote_cron_history
+   where start_time > now() - interval '24 hours'
+   order by start_time desc;
+   ```
 3. Check Sentry / Vercel logs scoped to the relevant logger namespace
    (`stripe/webhook`, `vapi/webhook`, `cron/send-reports`, etc.). All
    logs are PII-redacted at the `lib/logger.ts` layer.

@@ -60,9 +60,13 @@ regression that customers will (rightly) complain about.
   whether the cron will eventually complete them. The
   `cron/retry-failed-calls` job re-attempts within its SLA window
   before the report is sent — most "timeouts" self-heal.
-- If you have to manually refund: use Stripe dashboard, then INSERT
-  into `payments` with status `refunded` referencing the same
-  `stripe_event_id` for traceability.
+- If you have to manually refund: open `/admin/requests/<id>` and
+  click **Refund $9.99** — it calls Stripe with the same idempotency
+  key the cron uses (so a later cron tick won't double-refund) AND
+  updates the payments row in the same step. See
+  [admin-actions.md](./admin-actions.md) for the full button
+  reference. Pair with **Mark failed** to surface the row as
+  terminal in the customer's `/dashboard`.
 
 ## After the fire is out
 

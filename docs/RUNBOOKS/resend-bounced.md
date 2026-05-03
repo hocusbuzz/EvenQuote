@@ -60,9 +60,13 @@ this needs a fast halt-and-investigate, not a slow fix.
 
 ## Communicate
 
-- Affected customers: send manually (with the now-working setup)
-  using a script that pulls `quote_requests` where `report_sent_at
-  is null and status='completed'` and re-fires the template.
+- Affected customers: open each in `/admin/requests/<id>` and click
+  **Resend report** — re-renders from current DB state and sends
+  via Resend with the now-working key. See
+  [admin-actions.md](./admin-actions.md). For a backlog of >5 stuck
+  rows, write a one-off script that pulls `quote_requests` where
+  `report_sent_at is null and status='completed'` and POSTs to the
+  resendReportEmail server action — same primitive, batched.
 - Apologize for the delay; do not refund unless they ask. The work
   was actually done.
 
