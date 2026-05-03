@@ -10,10 +10,18 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Supabase client stub: processing queue empty → sendPendingReports
 // returns { ok:true, scanned:0, sent:0, failed:0, skipped:0, details:[] }.
 function buildAdminStub() {
+  // Mirrors the chain shape sendPendingReports actually uses today:
+  //   .from('quote_requests')
+  //     .select(...)
+  //     .in('status', ['processing', 'completed'])  // bumped from .eq() in #110
+  //     .is('report_sent_at', null)
+  //     .order('created_at', { ascending: true })
+  //     .limit(N)
+  // Tests only cover the empty-queue path so the data is always [].
   return {
     from: () => ({
       select: () => ({
-        eq: () => ({
+        in: () => ({
           is: () => ({
             order: () => ({
               limit: () => Promise.resolve({ data: [], error: null }),

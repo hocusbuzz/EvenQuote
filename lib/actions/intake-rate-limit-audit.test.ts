@@ -161,6 +161,10 @@ const VALID_CLEANING_INPUT = {
   zip: '98101',
   home_size: '3 bedroom',
   bathrooms: '2',
+  // square_footage_range was added (mandatory) in #114; old fixtures
+  // omitted it and silently failed validation before reaching the
+  // rate-limit gate this audit is locking.
+  square_footage_range: '1,200–1,800 sqft',
   cleaning_type: 'Standard',
   frequency: 'One-time',
   earliest_date: FUTURE_ISO,

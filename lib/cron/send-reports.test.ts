@@ -112,6 +112,7 @@ type StubState = {
   lastScanQuery: {
     filters: Record<string, unknown>;
     isNullCols: string[];
+    inFilters: Record<string, unknown>;
     orderings: Array<{ col: string; asc?: boolean }>;
     limit?: number;
   };
@@ -135,6 +136,7 @@ function makeAdmin(initial: Partial<StubState> = {}): {
     lastScanQuery: {
       filters: {},
       isNullCols: [],
+      inFilters: {},
       orderings: [],
     },
     ...initial,
@@ -163,6 +165,15 @@ function makeAdmin(initial: Partial<StubState> = {}): {
         };
         api.is = (col: string, val: unknown) => {
           if (val === null) query.isNullCols.push(col);
+          return api;
+        };
+        // Added 2026-05-02: send-reports widened its scan from
+        // .eq('status','processing') to .in('status', ['processing',
+        // 'completed']) in commit 13bdd2a (#110, refund orphaned
+        // zero-quote rows that bypassed processing). Stub needs the
+        // chain method or the whole scan throws.
+        api.in = (col: string, vals: unknown) => {
+          query.inFilters[col] = vals;
           return api;
         };
         api.order = (col: string, opts?: { ascending?: boolean }) => {
@@ -376,10 +387,17 @@ describe('sendPendingReports', () => {
     expect(sendEmailSpy).not.toHaveBeenCalled();
   });
 
-  it('applies the correct scan query: status=processing, report_sent_at null, created_at asc, limit 25', async () => {
+  it('applies the correct scan query: status in (processing|completed), report_sent_at null, created_at asc, limit 25', async () => {
+    // Test renamed + assertion shifted to inFilters in commit 13bdd2a
+    // (#110): scan widened from .eq('status','processing') to
+    // .in('status', ['processing','completed']) so that orphaned zero-
+    // quote 'completed' rows that bypassed processing also get
+    // refunded by the cron's zero-quote refund path.
     const { admin, state } = makeAdmin({ requests: [] });
     await sendPendingReports(admin);
-    expect(state.lastScanQuery.filters).toMatchObject({ status: 'processing' });
+    expect(state.lastScanQuery.inFilters).toMatchObject({
+      status: ['processing', 'completed'],
+    });
     expect(state.lastScanQuery.isNullCols).toContain('report_sent_at');
     expect(state.lastScanQuery.orderings[0]).toMatchObject({
       col: 'created_at',

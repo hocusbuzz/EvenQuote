@@ -253,15 +253,24 @@ describe('POST /api/stripe/webhook', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.received).toBe(true);
-    expect(body.note).toBe('Processed');
+    // #121 — webhook returns immediately; side effects run async via
+    // waitUntil. Note flipped from 'Processed' → 'Processed (side effects async)'.
+    expect(body.note).toBe('Processed (side effects async)');
 
     // Assertions on side effects
     expect(inserts).toHaveLength(1);
     expect(inserts[0].row.stripe_event_id).toBe('evt_new');
     expect(inserts[0].row.status).toBe('completed'); // NOT 'paid' — enum guard
+    // sendPaymentMagicLink now also receives recipientName + categoryName
+    // (read off intake_data.contact_name + service_categories.name) so
+    // the magic-link email can address the customer by name and use a
+    // vertical-specific subject line. Both default to null when the
+    // joined row doesn't include them (this stub doesn't seed either).
     expect(sendMagic).toHaveBeenCalledWith({
       email: 'buyer@example.com',
       requestId: 'req-new',
+      recipientName: null,
+      categoryName: null,
     });
     expect(enqueue).toHaveBeenCalledWith({ quoteRequestId: 'req-new' });
   });
@@ -458,7 +467,10 @@ describe('POST /api/stripe/webhook', () => {
     expect(res1.status).toBe(200);
     const body1 = await res1.json();
     expect(body1.received).toBe(true);
-    expect(body1.note).toBe('Processed');
+    // #121 — async side effects via waitUntil; note now includes the
+    // suffix so it's grep-distinguishable in logs from the legacy
+    // synchronous processing path.
+    expect(body1.note).toBe('Processed (side effects async)');
 
     // ── Second delivery (Stripe re-fire of the same event) ────────
     const res2 = await mod.POST(
@@ -652,7 +664,12 @@ describe('POST /api/stripe/webhook', () => {
     };
 
     const sendMagic = vi.fn().mockResolvedValue(undefined);
-    const enqueue = vi.fn().mockResolvedValue(undefined);
+    // #121 — async side effects now read enq.ok / enq.advanced; mock has
+    // to return a shape that satisfies that read so the side-effects
+    // pipeline doesn't crash before reaching this test's assertions.
+    const enqueue = vi
+      .fn()
+      .mockResolvedValue({ ok: true, advanced: true, enqueued: 1, note: 'ok' });
 
     vi.doMock('@/lib/stripe/server', () => ({
       getStripe: () => ({
@@ -681,6 +698,15 @@ describe('POST /api/stripe/webhook', () => {
     }));
     vi.doMock('@/lib/actions/post-payment', () => ({ sendPaymentMagicLink: sendMagic }));
     vi.doMock('@/lib/queue/enqueue-calls', () => ({ enqueueQuoteCalls: enqueue }));
+    // Step B (#121) — seedBusinessesForRequest runs before enqueue. The
+    // sharedAdmin stub only services updates against quote_requests; the
+    // seed helper would crash on its own .select() chain and fast-fail the
+    // pipeline, blocking enqueue. Mock the seed to succeed.
+    vi.doMock('@/lib/ingest/seed-on-demand', () => ({
+      seedBusinessesForRequest: vi
+        .fn()
+        .mockResolvedValue({ ok: true, inserted: 0, skipped: 0 }),
+    }));
 
     const mod = await import('./route');
 
@@ -1409,7 +1435,8 @@ describe('POST /api/stripe/webhook', () => {
         makeReq('{}', { 'stripe-signature': 't=1,v1=ok,eid=evt_note,sid=cs_note' })
       );
       const firstBody = (await first.json()) as { note?: string };
-      expect(firstBody.note).toBe('Processed');
+      // #121 — webhook returns the async-side-effects suffix.
+      expect(firstBody.note).toBe('Processed (side effects async)');
 
       // Retry: note flips to the locked "duplicate" string.
       const retry = await mod.POST(

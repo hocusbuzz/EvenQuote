@@ -59,8 +59,24 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CANONICAL_SLUGS = new Set(['moving', 'cleaning', 'handyman', 'lawn-care'] as const);
-const LIVE_SLUGS_EXPECTED = new Set(['moving', 'cleaning'] as const);
+// 2026-05-02: junk-removal added (seeded via supabase/migrations/0016_junk_removal_category.sql,
+// which lives outside the seed/ dir but is part of the canonical slug set).
+// All four "post-launch" verticals now ship live forms (handyman, lawn-care,
+// junk-removal joined moving + cleaning), so LIVE_SLUGS_EXPECTED widens to 5.
+const CANONICAL_SLUGS = new Set([
+  'moving',
+  'cleaning',
+  'handyman',
+  'lawn-care',
+  'junk-removal',
+] as const);
+const LIVE_SLUGS_EXPECTED = new Set([
+  'moving',
+  'cleaning',
+  'handyman',
+  'lawn-care',
+  'junk-removal',
+] as const);
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
@@ -151,12 +167,14 @@ function readLiveFormsKeys(filePath: string): Set<string> {
   const objectBody = match[1];
   const keys = new Set<string>();
 
-  // Extract key: value pairs where key is an identifier (bareword, not quoted)
-  // and value can be anything until comma or end
-  const keyPattern = /^\s*([a-z_][a-z0-9_-]*)\s*:/gm;
+  // Extract key: value pairs where key is either a bareword identifier
+  // or a quoted string (slugs with hyphens like 'lawn-care' / 'junk-removal'
+  // must be quoted to be valid TS object keys).
+  const keyPattern = /^\s*(?:(['"])([a-z_][a-z0-9_-]*)\1|([a-z_][a-z0-9_-]*))\s*:/gm;
   let m;
   while ((m = keyPattern.exec(objectBody)) !== null) {
-    keys.add(m[1]);
+    const key = m[2] || m[3];
+    if (key) keys.add(key);
   }
 
   return keys;
@@ -274,6 +292,14 @@ describe('seed-category-slug-drift', () => {
   const cwd = process.cwd();
   const seed0001Path = path.resolve(cwd, 'supabase/seed/0001_service_categories.sql');
   const seed0002Path = path.resolve(cwd, 'supabase/seed/0002_multi_vertical_categories.sql');
+  // 2026-05-02: junk-removal lives in a migration (0016) rather than the
+  // seed/ dir — the seed file is "post-launch unmaintained" per the
+  // migration's own header. Include it in the canonical scan so this
+  // audit catches drift on it the same as the original seed slugs.
+  const migration0016Path = path.resolve(
+    cwd,
+    'supabase/migrations/0016_junk_removal_category.sql',
+  );
   const intakePath = path.resolve(cwd, 'lib/actions/intake.ts');
   const cleaningIntakePath = path.resolve(cwd, 'lib/actions/cleaning-intake.ts');
   const categoryPagePath = path.resolve(cwd, 'app/get-quotes/[category]/page.tsx');
@@ -296,17 +322,24 @@ describe('seed-category-slug-drift', () => {
       expect(slugs).toContain('lawn-care');
     });
 
+    it('migration 0016_junk_removal_category.sql contains junk-removal', () => {
+      const slugs = readSeededSlugs(migration0016Path);
+      expect(slugs).toContain('junk-removal');
+    });
+
     it('combined seeded slugs match CANONICAL_SLUGS exactly', () => {
       const seeds1 = readSeededSlugs(seed0001Path);
       const seeds2 = readSeededSlugs(seed0002Path);
-      const combined = new Set([...seeds1, ...seeds2]);
+      const seeds3 = readSeededSlugs(migration0016Path);
+      const combined = new Set([...seeds1, ...seeds2, ...seeds3]);
       expect(combined).toEqual(CANONICAL_SLUGS);
     });
 
     it('no unexpected slugs appear in either seed file', () => {
       const seeds1 = readSeededSlugs(seed0001Path);
       const seeds2 = readSeededSlugs(seed0002Path);
-      const combined = new Set([...seeds1, ...seeds2]);
+      const seeds3 = readSeededSlugs(migration0016Path);
+      const combined = new Set([...seeds1, ...seeds2, ...seeds3]);
 
       for (const slug of combined) {
         expect(CANONICAL_SLUGS).toContain(slug);
@@ -432,7 +465,8 @@ describe('seed-category-slug-drift', () => {
     it('every CANONICAL_SLUG appears in seeded data', () => {
       const seeds1 = readSeededSlugs(seed0001Path);
       const seeds2 = readSeededSlugs(seed0002Path);
-      const combined = new Set([...seeds1, ...seeds2]);
+      const seeds3 = readSeededSlugs(migration0016Path);
+      const combined = new Set([...seeds1, ...seeds2, ...seeds3]);
 
       for (const slug of CANONICAL_SLUGS) {
         expect(combined).toContain(slug);

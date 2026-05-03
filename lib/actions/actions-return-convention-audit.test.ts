@@ -40,7 +40,62 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { extractExportedAsyncFunctionBody } from '../../tests/helpers/source-walker';
+import {
+  extractExportedAsyncFunctionBody,
+  stripCommentsPreservingPositions,
+} from '../../tests/helpers/source-walker';
+
+// 2026-05-02: void-or-redirect convention check needs to ignore returns
+// inside NESTED function/arrow bodies (e.g. an inner IIFE used to compute
+// a constant). `sendPaymentMagicLink` is genuinely Promise<void> at the
+// outer level but contains an inner `(() => { return ... })()` IIFE that
+// the bare regex flagged. This helper walks the body, finds any nested
+// `function (...) {}` or `(...) => {}` bodies, and blanks them out
+// (length-preserving) so the outer-only regex match is accurate.
+function stripNestedFunctionBodies(body: string): string {
+  // Use the position-preserving comment stripper so braces inside
+  // comments / strings don't fool the brace walker.
+  const stripped = stripCommentsPreservingPositions(body);
+  const chars = body.split('');
+  // Match each `=>` or `function` keyword followed by a `{` body.
+  // Two cases:
+  //   (a) `(...) => {`            arrow function with block body
+  //   (b) `function ...(...) {`   declaration / expression
+  // Both end at the matching `}`. We walk through `stripped`, find each
+  // candidate `{`, then balance-walk to its closing `}` and blank the
+  // span (excluding the braces themselves) in `chars`.
+  const candidates: number[] = [];
+  // Arrow body: `=>` followed by optional whitespace + `{`.
+  const arrowRe = /=>\s*\{/g;
+  let am: RegExpExecArray | null;
+  while ((am = arrowRe.exec(stripped)) !== null) {
+    candidates.push(am.index + am[0].length - 1); // index of `{`
+  }
+  // function expression / declaration body: `function <name?>(...)\s*{`
+  const fnRe = /\bfunction\b[^{}(]*\([^)]*\)\s*\{/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fnRe.exec(stripped)) !== null) {
+    candidates.push(fm.index + fm[0].length - 1);
+  }
+  // Walk each candidate's body and blank chars[bodyStart+1 .. closingBrace-1].
+  for (const openIdx of candidates) {
+    let depth = 1;
+    let k = openIdx + 1;
+    while (k < stripped.length && depth > 0) {
+      const ch = stripped[k];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      if (depth === 0) break;
+      k++;
+    }
+    if (depth !== 0) continue; // unbalanced; bail
+    // Blank out chars[openIdx+1 .. k-1] (preserve newlines for line counts).
+    for (let j = openIdx + 1; j < k; j++) {
+      if (chars[j] !== '\n') chars[j] = ' ';
+    }
+  }
+  return chars.join('');
+}
 
 const ACTIONS_DIR = path.resolve(process.cwd(), 'lib/actions');
 
@@ -264,8 +319,11 @@ describe('server-action return convention audit (R37g)', () => {
         case 'void-or-redirect': {
           // Must either `redirect(...)` or have no value-returning
           // `return <expr>;`. A bare `return;` is fine.
-          const valueReturn = /return\s+[A-Za-z_'"`{[(]/.test(body);
-          const hasRedirect = /\bredirect\s*\(/.test(body);
+          // Strip nested function/arrow bodies first so an inner IIFE's
+          // value-returns don't false-trip the outer-only convention.
+          const outer = stripNestedFunctionBodies(body);
+          const valueReturn = /return\s+[A-Za-z_'"`{[(]/.test(outer);
+          const hasRedirect = /\bredirect\s*\(/.test(outer);
           const isPostPayment = fx.fn === 'sendPaymentMagicLink';
           if (!hasRedirect && !isPostPayment) {
             // post-payment is pure-void; others in this bucket

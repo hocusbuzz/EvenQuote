@@ -39,6 +39,12 @@ const ROUTE_PATH = path.join(
 
 const EXPECTED_HANDLED = new Set<string>([
   'checkout.session.completed',
+  // 2026-05-02: chargeback / dispute handler. Routes to
+  // handleDisputeCreated → log + Sentry capture + ops alert. Real side
+  // effects (not ack-only): Stripe gives 7-21 days to respond and we
+  // need human judgment, so the route surfaces the dispute via
+  // observability rather than silently 200.
+  'charge.dispute.created',
 ]);
 
 // ACK-only events — 200 + note, no side effects. Each one is here for

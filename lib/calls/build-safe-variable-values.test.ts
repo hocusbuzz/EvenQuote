@@ -239,8 +239,12 @@ describe('buildSafeVariableValues — edge cases', () => {
       state: 'CA',
       zip_code: '00000',
     });
-    // home_size is undefined → key not in 'in' check, so it's not added.
-    expect('home_size' in out).toBe(false);
+    // home_size: undefined — the source's `if (key in intake)` gate is TRUE
+    // for `{home_size: undefined}` (the key exists), so the
+    // `v === undefined → null` branch fires and the key is preserved as
+    // null. Documenting current behavior; if we ever want undefined to
+    // drop the key entirely, change the gate to `!(key in intake) || intake[key] === undefined`.
+    expect(out.home_size).toBeNull();
     // pets is explicitly null → preserved as null.
     expect(out.pets).toBeNull();
   });

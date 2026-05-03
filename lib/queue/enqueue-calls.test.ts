@@ -34,10 +34,43 @@ function mockEngineThrows(err: Error) {
   }));
 }
 
+// #117 — enqueueQuoteCalls now reads `quote_requests` for a business-hours
+// deferral check before delegating to runCallBatch. We mock the admin
+// client to return a row whose state resolves to a tz that's currently
+// in-hours, so the facade always falls through to runCallBatch (the
+// deferral path has its own dedicated coverage in the cron tests).
+function mockAdminAndBusinessHours() {
+  vi.doMock('@/lib/supabase/admin', () => ({
+    createAdminClient: () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            single: () =>
+              Promise.resolve({
+                data: { id: 'qr-x', state: 'CA', scheduled_dispatch_at: null },
+                error: null,
+              }),
+          }),
+        }),
+        update: () => ({
+          eq: () => Promise.resolve({ error: null }),
+        }),
+      }),
+    }),
+  }));
+  // Force in-hours so the facade always falls through to runCallBatch.
+  vi.doMock('@/lib/scheduling/business-hours', () => ({
+    isBusinessHoursLocal: () => true,
+    nextBusinessHourStart: () => new Date(),
+    resolveTimezoneFromState: () => 'America/Los_Angeles',
+  }));
+}
+
 describe('enqueueQuoteCalls', () => {
   beforeEach(() => {
     vi.resetModules();
     captureExceptionMock.mockReset();
+    mockAdminAndBusinessHours();
   });
 
   it('throws when quoteRequestId is missing', async () => {

@@ -63,6 +63,21 @@ const NO_CAPTURE_MODULES = [
   'dev-token-auth.ts',
   'constant-time-equal.ts',
   'csp.ts',
+  // 2026-05-02: three additional adversarial-frequency gates landed
+  // post-launch. All three are pure validators with no Sentry surface
+  // (verified by grep at audit time):
+  //   • honeypot.ts — checks the hidden honeypot field on intake forms;
+  //     a tripped honeypot is the BOT's best Sentry-amplification trigger.
+  //   • scrub-pii.ts — best-effort PII redaction before free-text reaches
+  //     downstream surfaces (call prompts, logs). Failure modes are
+  //     "scrub didn't catch this" — observability lives in unit tests,
+  //     not Sentry.
+  //   • turnstile.ts — Cloudflare Turnstile token verification on intake.
+  //     Token rejection is, by design, an attacker probe — capturing
+  //     would amplify the floodable surface.
+  'honeypot.ts',
+  'scrub-pii.ts',
+  'turnstile.ts',
 ] as const;
 
 // Tokens that indicate a capture call or import site. These are

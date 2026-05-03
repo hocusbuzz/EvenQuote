@@ -422,11 +422,21 @@ describe('submitMovingIntake', () => {
     );
     const { submitMovingIntake } = await import('./intake');
 
+    // Use a distinct email per call: an additional per-email throttle
+    // (5/day) was added after this test was written; sharing a single
+    // email across 10 IP-bound calls trips the email throttle long
+    // before the IP throttle is exercised.
     for (let i = 0; i < 10; i++) {
-      const r = await submitMovingIntake(VALID_MOVING_INPUT);
+      const r = await submitMovingIntake({
+        ...VALID_MOVING_INPUT,
+        contact_email: `alice+rl${i}@example.com`,
+      });
       expect(r.ok).toBe(true);
     }
-    const blocked = await submitMovingIntake(VALID_MOVING_INPUT);
+    const blocked = await submitMovingIntake({
+      ...VALID_MOVING_INPUT,
+      contact_email: `alice+rl-blocked@example.com`,
+    });
     expect(blocked.ok).toBe(false);
     if (!blocked.ok) expect(blocked.error).toMatch(/too many requests/i);
   });

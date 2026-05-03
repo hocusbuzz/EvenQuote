@@ -62,6 +62,10 @@ const VALID_CLEANING_INPUT = {
   zip: '98101',
   home_size: '3 bedroom',
   bathrooms: '2',
+  // square_footage_range was added (mandatory) in #114; old fixtures
+  // omitted it and silently fell to "Please review the highlighted
+  // fields." Add a representative bucket so validation passes.
+  square_footage_range: '1,200–1,800 sqft',
   cleaning_type: 'Standard',
   frequency: 'One-time',
   earliest_date: FUTURE_ISO,
@@ -363,11 +367,21 @@ describe('submitCleaningIntake', () => {
       { data: { id: 'qr-rl' }, error: null }
     );
     const { submitCleaningIntake } = await import('./cleaning-intake');
+    // Use a distinct email per call: an additional per-email throttle
+    // (5/day) was added to cleaning-intake after this test was written;
+    // sharing a single email across 10 IP-bound calls trips the email
+    // throttle long before the IP throttle is exercised.
     for (let i = 0; i < 10; i++) {
-      const r = await submitCleaningIntake(VALID_CLEANING_INPUT);
+      const r = await submitCleaningIntake({
+        ...VALID_CLEANING_INPUT,
+        contact_email: `bob+rl${i}@example.com`,
+      });
       expect(r.ok).toBe(true);
     }
-    const blocked = await submitCleaningIntake(VALID_CLEANING_INPUT);
+    const blocked = await submitCleaningIntake({
+      ...VALID_CLEANING_INPUT,
+      contact_email: `bob+rl-blocked@example.com`,
+    });
     expect(blocked.ok).toBe(false);
     if (!blocked.ok) expect(blocked.error).toMatch(/too many requests/i);
   });

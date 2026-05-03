@@ -251,7 +251,12 @@ describe('app/ capture-site shape audit (R33)', () => {
     //   • cron/dispatch-scheduled-requests park-for-refund site
     //   • additional capture site from the magic-link rewrite that
     //     splits generateLink and sendEmail per R30 reason granularity
-    expect(total, `route capture sites = ${total}; expected 8-24`).toBeGreaterThanOrEqual(8);
-    expect(total, `route capture sites = ${total}; expected 8-24`).toBeLessThanOrEqual(24);
+    // 2026-05-02 raised to 28 to accommodate:
+    //   • stripe/webhook charge.dispute.created handler (#122)
+    //   • stripe/webhook async-side-effects pipeline (#121) — adds
+    //     per-step capture sites (magic-link / seed / enqueue / new-
+    //     payment alert) under the runPostPaymentSideEffects umbrella
+    expect(total, `route capture sites = ${total}; expected 8-28`).toBeGreaterThanOrEqual(8);
+    expect(total, `route capture sites = ${total}; expected 8-28`).toBeLessThanOrEqual(28);
   });
 });

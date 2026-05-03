@@ -198,8 +198,9 @@ const READ_SITES: ReadSite[] = [
   },
   {
     path: 'app/api/stripe/webhook/route.ts',
-    description: 'webhook: extract contact email for post-payment magic link',
-    reads: new Set(['contact_email']),
+    description:
+      'webhook: extract contact email + name for post-payment magic link (recipientName for branded greeting)',
+    reads: new Set(['contact_email', 'contact_name']),
   },
   {
     path: 'lib/actions/checkout.ts',
@@ -308,6 +309,11 @@ describe('intake_data READ-path drift (R41)', () => {
     // The calls engine fans out ALL intake keys to the Vapi prompt —
     // it's a generic passthrough, not a named-field reader.
     'lib/calls/engine.ts',
+    // The variable-values builder iterates a static allowlist
+    // (ALLOWED_INTAKE_KEYS) over `qr.intake_data` — it's a generic
+    // PII-scoped passthrough, not a named-field reader. The PII contract
+    // is locked separately by lib/calls/build-safe-variable-values.test.ts.
+    'lib/calls/build-safe-variable-values.ts',
     // Retry-calls cron also uses the generic passthrough via
     // buildVariableValues().
     'lib/cron/retry-failed-calls.ts',
