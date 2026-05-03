@@ -44,6 +44,11 @@ export function SiteFooter() {
                 </Link>
               </li>
               <li>
+                <Link href="/pricing" className="hover:text-lime">
+                  Pricing
+                </Link>
+              </li>
+              <li>
                 <Link href="/#how" className="hover:text-lime">
                   How it works
                 </Link>

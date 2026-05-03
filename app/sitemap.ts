@@ -56,6 +56,12 @@ const STATIC_ENTRIES: MetadataRoute.Sitemap = [
     changeFrequency: 'weekly',
     priority: 0.9,
   },
+  {
+    url: `${BASE}/pricing`,
+    lastModified: new Date(),
+    changeFrequency: 'monthly',
+    priority: 0.8,
+  },
 ];
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {

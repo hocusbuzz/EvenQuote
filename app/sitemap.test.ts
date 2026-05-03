@@ -63,11 +63,13 @@ describe('sitemap', () => {
     });
     const sitemap = (await import('./sitemap')).default;
     const entries = await sitemap();
-    // Only the two STATIC_ENTRIES should remain.
-    expect(entries).toHaveLength(2);
+    // Only the STATIC_ENTRIES should remain — bumped 2 → 3 with the
+    // /pricing standalone page (commit-pending).
+    expect(entries).toHaveLength(3);
     expect(entries.map((e) => e.url)).toEqual([
       'https://evenquote.com/',
       'https://evenquote.com/get-quotes',
+      'https://evenquote.com/pricing',
     ]);
   });
 
@@ -182,7 +184,7 @@ describe('sitemap — observability contract — no capture', () => {
     const sitemap = (await import('./sitemap')).default;
     const entries = await sitemap();
     // Static-only fallback.
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(3);
     // CRUCIAL: the explicit graceful-degradation catch must NOT
     // capture. This is the entire reason for the no-capture
     // contract — public-bot-frequency endpoint that should NOT
@@ -197,7 +199,7 @@ describe('sitemap — observability contract — no capture', () => {
     });
     const sitemap = (await import('./sitemap')).default;
     const entries = await sitemap();
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(3);
     expect(captureExceptionMock).not.toHaveBeenCalled();
     expect(captureMessageMock).not.toHaveBeenCalled();
   });
