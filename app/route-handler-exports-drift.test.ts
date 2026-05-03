@@ -153,8 +153,8 @@ const EXPECTED_ROUTES: Record<string, RouteSpec> = {
   },
 
   // Composite status: GET for read, POST for integration probes.
-  // `checkStripe` + `checkVapi` are imported by the check-status
-  // cron — deliberate cross-route helper sharing.
+  // `checkStripe` + `checkVapi` + `checkResend` are imported by the
+  // check-status cron — deliberate cross-route helper sharing.
   // `StatusResponse` is the TS shape consumed by callers.
   'app/api/status/route.ts': {
     methods: ['GET', 'POST'],
@@ -167,6 +167,10 @@ const EXPECTED_ROUTES: Record<string, RouteSpec> = {
       },
       {
         name: 'checkVapi',
+        reason: 'imported by app/api/cron/check-status/route.ts',
+      },
+      {
+        name: 'checkResend',
         reason: 'imported by app/api/cron/check-status/route.ts',
       },
     ],
