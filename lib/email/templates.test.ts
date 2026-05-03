@@ -11,10 +11,12 @@ import {
   renderContactRelease,
   renderCallsScheduled,
   renderNewPaymentAlert,
+  renderWinBack,
   type QuoteReportInput,
   type ContactReleaseInput,
   type CallsScheduledInput,
   type NewPaymentAlertInput,
+  type WinBackInput,
 } from './templates';
 
 function baseQuoteInput(
@@ -556,5 +558,93 @@ describe('renderNewPaymentAlert', () => {
     const out = renderNewPaymentAlert(baseAlertInput());
     expect(out.text).toContain('cbfe6980-6252-4854-a889-1d3231e53df5');
     expect(out.text).toContain('https://evenquote.com/admin/requests/');
+  });
+});
+
+// ─── renderWinBack ──────────────────────────────────────────────────
+
+function baseWinBackInput(overrides: Partial<WinBackInput> = {}): WinBackInput {
+  return {
+    recipientName: 'Antonio',
+    categoryName: 'Handyman',
+    categorySlug: 'handyman',
+    location: 'San Marcos, CA',
+    daysSincePriorRequest: 14,
+    ctaUrl: 'https://evenquote.com/get-quotes/handyman?utm_source=evenquote&utm_medium=email&utm_campaign=winback',
+    ...overrides,
+  };
+}
+
+describe('renderWinBack', () => {
+  it('subject is short, lowercase-vertical, ends with question mark', () => {
+    // Locked: short subject reads better in inbox, lowercase vertical
+    // matches body voice ("a handyman job", not "a Handyman job"), and
+    // the question mark is the tonal anchor that distinguishes this
+    // from a transactional notification.
+    const out = renderWinBack(baseWinBackInput());
+    expect(out.subject).toBe('Another handyman job to quote?');
+  });
+
+  it('greets by name when present, falls back to "Hi," otherwise', () => {
+    const named = renderWinBack(baseWinBackInput());
+    expect(named.html).toContain('Hi Antonio,');
+    const anon = renderWinBack(baseWinBackInput({ recipientName: null }));
+    expect(anon.html).toContain('Hi,');
+    expect(anon.html).not.toMatch(/Hi null/);
+  });
+
+  it('mentions the prior vertical + city + days-ago in the body so it doesn\'t read as generic blast', () => {
+    const out = renderWinBack(baseWinBackInput());
+    expect(out.html).toMatch(/14 days ago/);
+    expect(out.html).toMatch(/handyman job/);
+    expect(out.html).toContain('San Marcos, CA');
+  });
+
+  it('CTA links to the per-vertical intake URL passed in (utm tags survive escaping)', () => {
+    const out = renderWinBack(baseWinBackInput());
+    // escapeHtml turns & into &amp; — so the asserted form is the
+    // post-escape URL Google's analytics will receive.
+    expect(out.html).toContain('href="https://evenquote.com/get-quotes/handyman?utm_source=evenquote&amp;utm_medium=email&amp;utm_campaign=winback"');
+    expect(out.html).toContain('Start another handyman request');
+  });
+
+  it('body includes the opt-out instruction so the recipient knows how to silence', () => {
+    // Self-documenting opt-out — without this we have to handle
+    // "stop emailing me" support tickets manually.
+    const out = renderWinBack(baseWinBackInput());
+    expect(out.html).toMatch(/no thanks/);
+    expect(out.text).toMatch(/no thanks/);
+  });
+
+  it('reuses the same htmlShell chrome as other branded emails (consistency lock)', () => {
+    // If a future "win-back redesign" forks the chrome, this test
+    // catches it. Same surface every customer email uses.
+    const out = renderWinBack(baseWinBackInput());
+    expect(out.html).toContain('<!doctype html>');
+    expect(out.html).toContain('background-color:#F5F1E8');
+  });
+
+  it('escapes HTML in customer-supplied fields (XSS guard via recipientName, categoryName, location)', () => {
+    const out = renderWinBack(
+      baseWinBackInput({
+        recipientName: '<script>alert(1)</script>',
+        categoryName: 'Handy<img src=x>man',
+        location: 'San Marcos"><b>',
+      }),
+    );
+    expect(out.html).not.toContain('<script>alert(1)</script>');
+    expect(out.html).not.toContain('<img src=x>');
+    expect(out.html).toContain('&lt;script&gt;');
+    expect(out.html).toContain('&lt;img');
+    expect(out.html).toContain('&quot;');
+  });
+
+  it('text version is plain and includes the CTA URL un-escaped', () => {
+    // text/plain alternative is what spam filters parse + what
+    // Apple Mail's preview pane shows — don't HTML-escape it.
+    const out = renderWinBack(baseWinBackInput());
+    expect(out.text).toContain('Hi Antonio,');
+    expect(out.text).toContain('https://evenquote.com/get-quotes/handyman?utm_source=evenquote&utm_medium=email&utm_campaign=winback');
+    expect(out.text).not.toContain('<');
   });
 });

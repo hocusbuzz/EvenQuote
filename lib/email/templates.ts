@@ -768,3 +768,105 @@ export function renderContactRelease(input: ContactReleaseInput): Rendered {
     text,
   };
 }
+
+// ─── 6. Win-back nudge ──────────────────────────────────────────────
+//
+// Sent by the send-winbacks cron to a customer 7+ days after a
+// COMPLETED request, asking if they have another job to quote. One-
+// time per customer per cooldown window (60 days, enforced cron-side
+// by quote_requests.win_back_sent_at).
+//
+// Audience: a satisfied past customer, not a cold lead. Tone is
+// friendly, low-pressure, and concrete — references the city +
+// vertical from their prior request so it doesn't read as a generic
+// blast. Includes a one-click link to the SAME vertical's intake
+// form (pre-categorized) plus an opt-out instruction.
+//
+// What we deliberately don't do:
+//   • Don't include a discount code (cheapens the product, attracts
+//     coupon-shoppers, and the price is already $9.99 — there's
+//     nowhere to go but free)
+//   • Don't show stats from the prior report (those are PII-adjacent
+//     and the email goes through Resend's sending domain — keeping
+//     the email content low-PII reduces the deliverability blast
+//     radius if the email leaks)
+//   • Don't link to the prior dashboard (driving back to the OLD
+//     report is anti-conversion — we want a NEW request)
+
+export type WinBackInput = {
+  /** Customer's display name from profile.full_name. May be null. */
+  recipientName: string | null;
+  /** e.g. "Moving", "Handyman" — capitalized. */
+  categoryName: string;
+  /** Vertical slug for the CTA link, e.g. "moving". */
+  categorySlug: string;
+  /** "City, ST" — same shape used everywhere else. */
+  location: string;
+  /** Days since the prior request was paid. Drives the "X days ago" copy. */
+  daysSincePriorRequest: number;
+  /** Absolute URL to the vertical's intake page. */
+  ctaUrl: string;
+};
+
+export function renderWinBack(input: WinBackInput): Rendered {
+  const greeting = input.recipientName
+    ? `Hi ${escapeHtml(input.recipientName)},`
+    : 'Hi,';
+  const cat = input.categoryName.toLowerCase();
+  const subject = `Another ${cat} job to quote?`;
+
+  const inner = `
+    <p style="font-size:15px; margin:0 0 14px 0;">${greeting}</p>
+
+    <p style="font-size:15px; margin:0 0 14px 0; line-height:1.55;">
+      You used EvenQuote ${input.daysSincePriorRequest} days ago for a
+      ${escapeHtml(cat)} job in ${escapeHtml(input.location)}. We hope the
+      quotes were useful.
+    </p>
+
+    <p style="font-size:15px; margin:0 0 22px 0; line-height:1.55;">
+      If you&rsquo;ve got another job that needs pricing &mdash; same
+      vertical or different &mdash; we&rsquo;ll dial 5 fresh local pros
+      and have a clean comparison report in your inbox in an hour.
+      Same flat $9.99.
+    </p>
+
+    <p style="margin:0 0 28px 0;">
+      <a
+        href="${escapeHtml(input.ctaUrl)}"
+        style="
+          display:inline-block;
+          background-color:#0A0A0A;
+          color:#F5F1E8;
+          padding:14px 28px;
+          border-radius:8px;
+          font-size:16px;
+          font-weight:600;
+          text-decoration:none;
+        "
+      >Start another ${escapeHtml(cat)} request &rarr;</a>
+    </p>
+
+    <p style="font-size:12px; margin:24px 0 0 0; color:#9ca3af; line-height:1.55;">
+      Don&rsquo;t want these check-ins? Just reply with &ldquo;no thanks&rdquo; and we&rsquo;ll skip you on future ones. We send these at most once every couple months.
+    </p>
+  `;
+
+  const text = [
+    input.recipientName ? `Hi ${input.recipientName},` : 'Hi,',
+    '',
+    `You used EvenQuote ${input.daysSincePriorRequest} days ago for a ${cat} job in ${input.location}. We hope the quotes were useful.`,
+    '',
+    `If you've got another job that needs pricing — same vertical or different — we'll dial 5 fresh local pros and have a clean comparison report in your inbox in an hour. Same flat $9.99.`,
+    '',
+    `Start another ${cat} request: ${input.ctaUrl}`,
+    '',
+    `Don't want these check-ins? Just reply with "no thanks" and we'll skip you on future ones. We send these at most once every couple months.`,
+  ].join('\n');
+
+  return {
+    subject,
+    html: htmlShell(inner),
+    text,
+  };
+}

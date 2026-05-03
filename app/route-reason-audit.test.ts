@@ -57,6 +57,7 @@ const EXPECTED_REASONS: Record<string, readonly string[]> = {
   'cron/reconcile-calls': ['runFailed'],
   'cron/retry-failed-calls': ['runFailed'],
   'cron/send-reports': ['runFailed'],
+  'cron/send-winbacks': ['runFailed'],
   'get-quotes/claim': ['requestLoadFailed', 'quoteBackfillFailed'],
 };
 

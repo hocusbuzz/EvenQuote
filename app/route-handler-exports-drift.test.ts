@@ -108,6 +108,10 @@ const EXPECTED_ROUTES: Record<string, RouteSpec> = {
     methods: ['GET', 'POST'],
     config: ['dynamic', 'runtime'],
   },
+  'app/api/cron/send-winbacks/route.ts': {
+    methods: ['GET', 'POST'],
+    config: ['dynamic', 'runtime'],
+  },
 
   // CSP violation reports: browser POSTs only.
   'app/api/csp-report/route.ts': {

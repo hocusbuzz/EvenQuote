@@ -194,6 +194,17 @@ const EXPECTED_SHAPES: ShapeLock[] = [
     forbiddenKeys: ['message', 'reason', 'stack', 'status'],
     minResponses: 1,
   },
+  {
+    // Win-back email cron — re-engages satisfied past customers 7-30
+    // days after a completed request. Same shape contract as the
+    // other cron routes: success forwards sendWinBacks() result;
+    // failure leg returns { ok:false, error } from the route catch.
+    file: 'api/cron/send-winbacks/route.ts',
+    requiredKeys: ['ok', 'error'],
+    allowedKeys: ['ok', 'error'],
+    forbiddenKeys: ['message', 'reason', 'stack', 'status'],
+    minResponses: 1,
+  },
   // ── Webhook endpoints (JSON body) ──────────────────────────────
   {
     file: 'api/stripe/webhook/route.ts',
