@@ -243,10 +243,63 @@ export async function runCallBatchWith(
 
   const variableValues = buildSafeVariableValues(claimed);
 
+  // Vapi concurrency cap. The free tier is 10 concurrent calls;
+  // paid tiers buy more reserved lines. We dispatch sequentially
+  // here (one API call at a time) but Vapi keeps each accepted
+  // call ringing in parallel — a single 5-business batch holds 5
+  // Vapi slots simultaneously. Two paid customers landing within
+  // seconds of each other trivially exceeds 10.
+  //
+  // Pre-check the in-flight count BEFORE each dispatch and defer
+  // (mark failed with started_at IS NULL) when at the cap. The
+  // retry-failed-calls cron picks up deferred rows on its next
+  // tick — by then earlier calls have ended and slots have freed.
+  // Without this, the alternative is reactive: Vapi returns 4xx,
+  // the engine logs the failure, and we still email the founder
+  // a "concurrency limit hit" notification per Vapi's policy.
+  //
+  // Default 8 leaves 2-slot headroom under the free-tier cap of 10
+  // for race conditions + inbound callbacks. Bumped via
+  // VAPI_MAX_CONCURRENT env var when paid Vapi tier is purchased.
+  const concurrencyCap = Number.parseInt(
+    process.env.VAPI_MAX_CONCURRENT ?? '8',
+    10,
+  );
+
   for (let i = 0; i < insertedCalls.length; i += 1) {
     const callRow = insertedCalls[i];
     const business = businesses.find((b) => b.id === callRow.business_id);
     if (!business) continue;
+
+    // Pre-dispatch concurrency gate. Cheap count() — Postgres
+    // satisfies it from the calls_status_idx without a row scan.
+    if (Number.isFinite(concurrencyCap) && concurrencyCap > 0) {
+      const { count: inFlight } = await admin
+        .from('calls')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'in_progress');
+      if ((inFlight ?? 0) >= concurrencyCap) {
+        failed += 1;
+        notes.push(
+          `call ${callRow.id}: deferred — ${inFlight} in-flight Vapi calls (cap ${concurrencyCap})`,
+        );
+        // Mark 'failed' with started_at left null so the
+        // retry-failed-calls cron picks it up at the next tick.
+        // The cron's filter (status='failed' AND started_at IS NULL
+        // AND retry_count<1) means each deferred call gets ONE
+        // retry — same as a regular dispatch failure.
+        const { error: deferErr } = await admin
+          .from('calls')
+          .update({ status: 'failed' })
+          .eq('id', callRow.id);
+        if (deferErr) {
+          notes.push(
+            `call ${callRow.id}: also failed to mark deferred state: ${deferErr.message}`,
+          );
+        }
+        continue;
+      }
+    }
 
     const dispatch = await startOutboundCall({
       toPhone: business.phone,

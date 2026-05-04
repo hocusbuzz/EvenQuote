@@ -47,6 +47,19 @@ const ServerEnvSchema = z.object({
   VAPI_PHONE_NUMBER_ID: z.string().optional(),
   VAPI_WEBHOOK_SECRET: z.string().optional(),
 
+  // Concurrent-call cap. The engine pre-checks the in-flight call
+  // count before each dispatch and defers (mark failed, retry cron
+  // picks up later) when at the cap. Default 8 leaves 2-slot
+  // headroom under Vapi's free-tier limit of 10. Bump when paid
+  // Vapi tier is purchased to match reserved-line allocation.
+  VAPI_MAX_CONCURRENT: z
+    .string()
+    .optional()
+    .refine(
+      (v) => v === undefined || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 200),
+      { message: 'VAPI_MAX_CONCURRENT must be an integer between 1 and 200' },
+    ),
+
   // ─── Resend (optional — simulation mode if missing) ────────────
   RESEND_API_KEY: z.string().startsWith('re_').optional(),
   // RESEND_FROM is often a full "Name <email@domain>" string, not a bare

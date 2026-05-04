@@ -46,6 +46,10 @@ vi.mock('@/lib/observability/sentry', () => ({
 type TableHandlers = {
   updateResult?: { data: unknown; error: unknown };
   insertResult?: { data: unknown; error: unknown };
+  // Pre-dispatch concurrency-cap probe: count of in-flight Vapi
+  // calls. Defaults to 0 (slot available); set in a test to
+  // exercise the deferral branch.
+  inFlightCount?: number;
   // Tracks the most recent .update() payload for assertions
   updates: { table: string; row: Record<string, unknown> }[];
   inserts: { table: string; rows: unknown[] }[];
@@ -102,6 +106,21 @@ function makeAdmin(
             state.updates.push({ table: 'calls', row });
             return { eq: () => Promise.resolve({ error: null }) };
           },
+          // Pre-dispatch concurrency-cap probe (added 2026-05-04
+          // after Vapi started rejecting bursts that exceeded the
+          // free-tier 10-call limit). Engine calls
+          //   .from('calls').select('id', { count, head }).eq('status','in_progress')
+          // before each dispatch. Stub returns count=0 so tests
+          // exercise the dispatch path; pass `inFlightCount` via
+          // the handlers arg if a future test wants to exercise the
+          // deferral branch.
+          select: () => ({
+            eq: () =>
+              Promise.resolve({
+                count: state.inFlightCount ?? 0,
+                error: null,
+              }),
+          }),
         };
       }
       if (table === 'businesses') {
@@ -208,6 +227,39 @@ describe('runCallBatchWith', () => {
     expect(callUpdates.some((u) => u.row.status === 'failed')).toBe(true);
     // Error note surfaces
     expect(result.notes.join('\n')).toMatch(/vapi timeout/);
+  });
+
+  it('defers dispatch + marks failed when in-flight Vapi calls hit the concurrency cap', async () => {
+    // Real-world cause: Vapi free tier caps at 10 concurrent calls.
+    // If two paid customers' batches overlap (5 calls each from
+    // their respective enqueues), Vapi's API rejects the surplus
+    // and emails ops a "concurrency limit hit" notification.
+    // The pre-dispatch check in engine.ts catches this BEFORE
+    // hitting Vapi: count in-flight, defer locally if at cap,
+    // let retry-failed-calls cron retry on next tick.
+    process.env.VAPI_MAX_CONCURRENT = '8';
+    selectSpy.mockResolvedValueOnce([
+      { id: 'biz-1', name: 'A', phone: '+14155550100' },
+      { id: 'biz-2', name: 'B', phone: '+14155550101' },
+    ]);
+    // startSpy intentionally NOT called — concurrency check should
+    // fire BEFORE we hit Vapi.
+    const { client, state } = makeAdmin(BASE_QR, { inFlightCount: 8 });
+    const { runCallBatchWith } = await import('./engine');
+    const result = await runCallBatchWith(client, { quoteRequestId: 'qr-1' });
+
+    expect(result.ok).toBe(true);
+    expect(result.dispatched).toBe(0);
+    expect(result.failed).toBe(2);
+    expect(startSpy).not.toHaveBeenCalled();
+    // Both rows marked failed (started_at left null) so the
+    // retry-failed-calls cron picks them up next tick.
+    const callUpdates = state.updates.filter((u) => u.table === 'calls');
+    expect(
+      callUpdates.filter((u) => u.row.status === 'failed').length,
+    ).toBe(2);
+    expect(result.notes.join('\n')).toMatch(/deferred — 8 in-flight/);
+    delete process.env.VAPI_MAX_CONCURRENT;
   });
 
   it('flags simulated=true when all dispatches were simulated', async () => {
@@ -417,6 +469,12 @@ describe('runCallBatchWith', () => {
                 }),
             }),
             update: () => ({ eq: () => Promise.resolve({ error: null }) }),
+            // Pre-dispatch concurrency probe — return 0 in-flight
+            // so these tests exercise the dispatch path, same as
+            // the main makeAdmin helper above.
+            select: () => ({
+              eq: () => Promise.resolve({ count: 0, error: null }),
+            }),
           };
         }
         if (table === 'businesses') {
@@ -501,6 +559,9 @@ describe('runCallBatchWith', () => {
             update: () => ({
               eq: () =>
                 Promise.resolve({ error: { message: 'calls_pkey violation' } }),
+            }),
+            select: () => ({
+              eq: () => Promise.resolve({ count: 0, error: null }),
             }),
           };
         }
@@ -688,6 +749,12 @@ describe('runCallBatchWith', () => {
                 }),
             }),
             update: () => ({ eq: () => Promise.resolve({ error: null }) }),
+            // Pre-dispatch concurrency probe — return 0 in-flight
+            // so these tests exercise the dispatch path, same as
+            // the main makeAdmin helper above.
+            select: () => ({
+              eq: () => Promise.resolve({ count: 0, error: null }),
+            }),
           };
         }
         if (table === 'businesses') {
