@@ -181,59 +181,84 @@ kills the product on first impression.
 
 ## 5. Apply outstanding migrations (5 min)
 
-Migration 0011 was applied during R47 testing. If your prod DB is a
-fresh project (different ref), apply all migrations:
+Apply every migration in `supabase/migrations/` through the current
+head before taking payments. Do not stop at 0011/0012 — later
+migrations add scheduled dispatch (0013-0014), reconcile-calls
+(0017), Realtime publication (0018), check-status schedule (0019),
+win-back tracking (0020-0021), and coupon state (0022).
 
 ```bash
 cd ~/Documents/Claude/Projects/EvenQuote
-SUPABASE_ACCESS_TOKEN=sbp_… \
-  npx tsx scripts/apply-migration.ts supabase/migrations/0011_quote_requests_origin_coords.sql
+SUPABASE_ACCESS_TOKEN=sbp_<paste-real-token> \
+  ls -1 supabase/migrations/*.sql | while read f; do
+    npx tsx scripts/apply-migration.ts "$f" || break
+  done
 ```
 
-Repeat for any 0001…0010 if it's a fresh project.
+Idempotent — every migration uses `if not exists` / `do $$ … exception
+when duplicate_object then null; end $$` patterns, so re-applying
+already-applied ones is safe. The `|| break` halts on first failure
+so you can fix + retry without skipping migrations.
 
-For the existing `xnhkuutoarmlmocqqpsh` project, all migrations
-through 0011 are already applied. Skip this step.
-
-Verify: query the live DB —
-`select column_name from information_schema.columns where table_name='quote_requests' and column_name like 'origin_%';`
-should return `origin_lat` and `origin_lng`.
+For the existing `xnhkuutoarmlmocqqpsh` project, every migration
+through 0022 has been applied during the launch sprint. Verify by
+querying `select * from information_schema.columns where table_name
+in ('quote_requests','coupons') and column_name in ('origin_lat',
+'scheduled_dispatch_at','win_back_sent_at','coupon_code','code');`
+— should return 5 rows.
 
 ---
 
 ## 6. pg_cron jobs (5 min)
 
-Four crons need to run in prod: `send-reports` (5min),
-`retry-failed-calls` (10min), `check-stuck-requests` (15min),
-`check-status` (per Vercel cron config).
+Seven pg_cron jobs need to run in prod:
 
-1. Migration 0008 wires the original three; **migration 0012 wires
-   the stuck-request watchdog**. If you're deploying to a fresh
-   Supabase project, apply both. For the existing project, 0012 is
-   new and needs applying. Generate a fresh PAT at
-   https://supabase.com/dashboard/account/tokens, then:
-   ```bash
-   SUPABASE_ACCESS_TOKEN=sbp_<paste-real-token-here> \
-     npm run apply:migration -- supabase/migrations/0012_pg_cron_stuck_requests.sql
-   ```
-   Revoke the PAT immediately after the migration succeeds.
-2. Verify all four jobs exist:
+| Job | Cadence | Purpose |
+| --- | --- | --- |
+| `evenquote-retry-failed-calls` | every 10min | Re-dispatch calls Vapi rejected on first attempt |
+| `evenquote-send-reports` | every 5min | Email the report once a request finishes (or refund if zero quotes) |
+| `evenquote-check-stuck-requests` | every 15min | Page ops on requests parked past their SLA |
+| `evenquote-dispatch-scheduled-requests` | every 5min | **Required** for outside-business-hours payments — turns `scheduled_dispatch_at` into actual dispatches at 9 AM local time |
+| `evenquote-reconcile-calls` | every 30min | Pull state from Vapi for calls whose end-of-call webhook dropped |
+| `evenquote-check-status` | every 15min | Probe Stripe + Vapi + Resend; capture to Sentry on key rotation / outage |
+| `evenquote-send-winbacks` | daily 17:00 UTC | Re-engage past customers 7-30 days post-completion (no-op until your first 7+ day-old `status='completed'` customer exists) |
+
+Without `evenquote-dispatch-scheduled-requests`, a payment outside
+business hours would park in `paid` state forever — the deferral
+logic in #117 stamps `scheduled_dispatch_at` and relies on this
+cron to pick it up.
+
+1. Migrations 0008 + 0012 + 0014 + 0017 + 0019 + 0021 wire the seven
+   schedules respectively. The blanket `apply-migration` loop in §5
+   above covers all of them. Generate a fresh PAT at
+   https://supabase.com/dashboard/account/tokens for the loop, then
+   revoke it after the migrations succeed.
+2. Verify all seven jobs exist:
    ```sql
    select jobname, schedule, active
      from cron.job
+    where jobname like 'evenquote-%'
     order by jobname;
    ```
-   Expect 3+ active rows (4 once 0012 is applied).
-2. Each cron POSTs to `/api/cron/<name>` with the `CRON_SECRET`
+   Expect exactly 7 `evenquote-*` rows, all `active = true`.
+3. Each cron POSTs to `/api/cron/<name>` with the `CRON_SECRET`
    bearer token. The token lives in Vault — verify the values:
    ```sql
-   select * from vault.decrypted_secrets where name like 'cron_%';
+   select * from vault.decrypted_secrets where name like 'evenquote_%';
    ```
-3. If the secret in Vault doesn't match the `CRON_SECRET` in
+4. If the secret in Vault doesn't match the `CRON_SECRET` in
    Vercel, update Vault to match (the cron uses Vault's value;
    the route validates against env's value).
-4. Verify: tail Vercel logs and wait one cron interval (~5 min for
-   send-reports). Expect 200 responses to `/api/cron/send-reports`.
+5. Verify: query the run history view after one full cycle (~30 min):
+   ```sql
+   select jobname, status, return_message, start_time
+     from private.evenquote_cron_history
+    where start_time > now() - interval '1 hour'
+    order by start_time desc limit 50;
+   ```
+   Expect a green tick from each cron at its expected cadence.
+   `evenquote-send-winbacks` only fires once at 17:00 UTC; the
+   other six should each have ≥1 recent entry.
 
 ---
 
