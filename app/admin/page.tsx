@@ -46,6 +46,7 @@ export default async function AdminOverviewPage() {
     // ── Today's pulse (founder funnel) ──────────────────────────
     requestsStartedToday,
     paidToday,
+    couponRedeemedToday,
     reportsDeliveredToday,
     completedRequestsToday,
     paidAllTimeRows,
@@ -68,6 +69,19 @@ export default async function AdminOverviewPage() {
       .from('payments')
       .select('amount, currency')
       .eq('status', 'completed')
+      .gte('created_at', sinceToday),
+    // Today: quote_requests with a coupon redemption. Coupon-paid
+    // rows DON'T create a payments row (the redeem_coupon RPC flips
+    // status='paid' directly without inserting payments), so the
+    // revenue card above is unaffected — this is a SEPARATE counter
+    // so the founder can distinguish "paid customers" from "free
+    // friend redemptions" without leaving /admin. Uses created_at
+    // (not a stamped redeemed_at) so it counts the request, not the
+    // coupon mint event — matches the rest of the day-bounded queries.
+    admin
+      .from('quote_requests')
+      .select('id', { count: 'exact', head: true })
+      .not('coupon_code', 'is', null)
       .gte('created_at', sinceToday),
     // Today: reports actually delivered (Resend send succeeded). Uses
     // report_sent_at because send-reports stamps it on outbox claim
@@ -207,7 +221,7 @@ export default async function AdminOverviewPage() {
           <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
             Today&apos;s pulse — {todayHumanLabel()}
           </p>
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
             <PulseCard
               label="Revenue today"
               value={formatUsdCents(revenueTodayCents)}
@@ -224,13 +238,24 @@ export default async function AdminOverviewPage() {
               tone={paidCountToday > 0 ? 'highlight' : 'neutral'}
             />
             <PulseCard
+              label="Coupons today"
+              value={String(couponRedeemedToday.count ?? 0)}
+              sub={
+                (couponRedeemedToday.count ?? 0) > 0
+                  ? 'free redemptions'
+                  : undefined
+              }
+            />
+            <PulseCard
               label="Requests started"
               value={String(requestsStartedToday.count ?? 0)}
               sub={
                 (requestsStartedToday.count ?? 0) > 0
                   ? `${Math.round(
-                      (paidCountToday / (requestsStartedToday.count ?? 1)) * 100,
-                    )}% paid`
+                      (((paidCountToday + (couponRedeemedToday.count ?? 0)) /
+                        (requestsStartedToday.count ?? 1)) *
+                        100),
+                    )}% converted`
                   : undefined
               }
             />

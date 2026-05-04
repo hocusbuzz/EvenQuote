@@ -46,7 +46,7 @@ export default async function AdminRequestDetailPage({
       `id, status, city, state, zip_code,
        total_businesses_to_call, total_calls_completed, total_quotes_collected,
        stripe_payment_id, user_id, intake_data, archived_at,
-       created_at, category_id, scheduled_dispatch_at,
+       created_at, category_id, scheduled_dispatch_at, coupon_code,
        service_categories:category_id(name, slug)`
     )
     .eq('id', id)
@@ -106,10 +106,17 @@ export default async function AdminRequestDetailPage({
   // is populated. Order of preference matches what's most useful for
   // ops debugging — the payment_intent id is what Stripe Dashboard
   // search expects; session_id is the next-best fallback; the legacy
-  // dev-trigger column is last.
+  // dev-trigger column is last. The 'coupon' kind is a no-Stripe-row
+  // path: redeemCoupon() flips the request to status='paid' without
+  // creating a payments row, so a non-null coupon_code is the only
+  // signal that this is a free redemption.
   const paymentRow = payments?.data ?? null;
-  const stripeDisplay: { kind: 'paid' | 'dev' | 'none'; id: string | null } =
-    paymentRow?.stripe_payment_intent_id
+  const stripeDisplay: {
+    kind: 'paid' | 'dev' | 'coupon' | 'none';
+    id: string | null;
+  } = request.coupon_code
+    ? { kind: 'coupon', id: request.coupon_code }
+    : paymentRow?.stripe_payment_intent_id
       ? { kind: 'paid', id: paymentRow.stripe_payment_intent_id }
       : paymentRow?.stripe_session_id
         ? { kind: 'paid', id: paymentRow.stripe_session_id }
@@ -161,19 +168,39 @@ export default async function AdminRequestDetailPage({
               <div className="text-foreground">{request.total_quotes_collected ?? 0}</div>
             </div>
             <div>
-              <div className="text-muted-foreground">Stripe</div>
+              <div className="text-muted-foreground">
+                {stripeDisplay.kind === 'coupon' ? 'Payment' : 'Stripe'}
+              </div>
               <div className="text-foreground">
                 {stripeDisplay.kind === 'paid' ? (
                   <span title={stripeDisplay.id ?? undefined}>paid</span>
                 ) : stripeDisplay.kind === 'dev' ? (
                   'dev trigger'
+                ) : stripeDisplay.kind === 'coupon' ? (
+                  // Lime pill so a coupon-paid request reads as
+                  // distinct-from-cash at a glance. The full code is
+                  // both visible (for ops) and tooltip'd (because the
+                  // pill is narrow).
+                  <span
+                    title={`Coupon ${stripeDisplay.id}`}
+                    className="inline-block rounded-sm bg-lime/40 px-1.5 py-0.5 font-mono text-[10px] tracking-wider text-foreground"
+                  >
+                    coupon
+                  </span>
                 ) : (
                   '—'
                 )}
               </div>
-              {paymentRow?.amount !== undefined &&
-              paymentRow?.amount !== null &&
-              paymentRow?.currency ? (
+              {stripeDisplay.kind === 'coupon' ? (
+                <div
+                  className="text-[10px] text-muted-foreground"
+                  title="Bypassed Stripe; no payments row"
+                >
+                  {stripeDisplay.id}
+                </div>
+              ) : paymentRow?.amount !== undefined &&
+                paymentRow?.amount !== null &&
+                paymentRow?.currency ? (
                 <div className="text-[10px] text-muted-foreground">
                   ${(paymentRow.amount / 100).toFixed(2)}{' '}
                   {paymentRow.currency.toUpperCase()}
