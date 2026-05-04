@@ -204,6 +204,16 @@ const FIXTURES: ActionFixture[] = [
     resultTypeName: 'SubmitResult',
   },
   {
+    // 2026-05-04: founder coupon-redemption surface for free-call
+    // friend codes. Atomic validate + bypass-Stripe + run post-payment
+    // side effects. Returns ok:true with redirectUrl OR ok:false with
+    // error — same convention as the intake actions.
+    file: 'coupons.ts',
+    fn: 'redeemCoupon',
+    convention: 'ok-union',
+    resultTypeName: 'RedeemCouponResult',
+  },
+  {
     file: 'handyman-intake.ts',
     fn: 'submitHandymanIntake',
     convention: 'ok-union',
@@ -355,7 +365,8 @@ describe('server-action return convention audit (R37g)', () => {
     // intakes (handyman, lawn-care, junk-removal — added in prior
     // commits but never catalogued) AND the 3 Tier 1 backlog #2
     // ops actions (refundRequestNow, markFailed, resendReportEmail).
-    expect(FIXTURES.length).toBe(19);
+    // 2026-05-04: bumped 19 → 20 after cataloging coupons.ts:redeemCoupon.
+    expect(FIXTURES.length).toBe(20);
   });
 
   it('every exported async function under lib/actions/ is catalogued in FIXTURES', () => {

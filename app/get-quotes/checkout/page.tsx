@@ -40,6 +40,7 @@ import { SiteNavbar } from '@/components/site/navbar';
 import { SiteFooter } from '@/components/site/footer';
 import { PayButton } from '@/components/checkout/pay-button';
 import { SkipPaymentButton } from '@/components/checkout/skip-payment-button';
+import { CouponInput } from '@/components/checkout/coupon-input';
 import { QUOTE_REQUEST_PRICE } from '@/lib/stripe/server';
 import { maskEmail } from '@/lib/text/pii';
 
@@ -226,6 +227,14 @@ export default async function CheckoutPage({ searchParams }: Props) {
               </Link>
               .
             </p>
+
+            {/* Coupon redemption — collapsed by default so it doesn't
+                compete with the primary Pay action. Server-side rate-
+                limited (5 attempts / 5 min per IP) so a guesser can't
+                brute-force the 31^12 coupon space. */}
+            <div className="mt-4">
+              <CouponInput requestId={request.id} />
+            </div>
 
             {/* Dev-only payment bypass. Only rendered off-production.
                 In prod this entire block is tree-shaken away because

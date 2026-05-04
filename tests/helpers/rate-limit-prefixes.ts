@@ -53,6 +53,7 @@ export const KNOWN_PREFIXES: readonly string[] = [
 
   // ── Production: server actions ────────────────────────────────────
   'waitlist', // lib/actions/waitlist.ts
+  'coupon-redeem', // 2026-05-04 — lib/actions/coupons.ts redeemCoupon (5 attempts / 5 min per IP).
 
   // ── Dev-only routes (R48(h) defense-in-depth) ─────────────────────
   // These routes 404 in prod (assertDevToken NODE_ENV gate). The

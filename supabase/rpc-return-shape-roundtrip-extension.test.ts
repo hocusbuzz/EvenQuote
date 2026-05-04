@@ -169,6 +169,9 @@ const EXPECTED_TABLE_RPCS = new Set<string>([
   'apply_call_end',
   'pick_vapi_number',
   'businesses_within_radius',
+  // 2026-05-04 — coupon redemption RPC; returns (outcome text, detail
+  // text); consumed via Row type cast in lib/actions/coupons.ts.
+  'redeem_coupon',
 ]);
 const EXPECTED_SCALAR_RPCS = new Set<string>([
   'recompute_business_success_rate',
@@ -184,6 +187,9 @@ const EXPECTED_SCALAR_RPCS = new Set<string>([
 const CONSUMED_TABLE_RPCS = new Set<string>([
   'pick_vapi_number',
   'businesses_within_radius',
+  // 2026-05-04 — Row type alias in lib/actions/coupons.ts consumes
+  // outcome + detail; subset round-trip below validates the field set.
+  'redeem_coupon',
 ]);
 
 // Table RPCs whose return the app MUST NOT destructure (no consumer
@@ -300,6 +306,36 @@ describe('supabase/ RPC round-trip extension (R44(a))', () => {
     expect(cast).toEqual(new Set(s.columns));
   });
 
+  // ── Round-trip: redeem_coupon SUBSET check ────────────────────────
+  // 2026-05-04 — lib/actions/coupons.ts declares a `type Row = { ... }`
+  // alias rather than inlining the cast at the .rpc() site. Walk the
+  // type alias body and assert its fields are a subset of the
+  // migration's return columns.
+
+  it('redeem_coupon app-side Row type alias fields are a SUBSET of migration columns', () => {
+    const s = SHAPES.get('redeem_coupon');
+    expect(s).toBeDefined();
+    if (!s || s.kind !== 'table') return;
+    const filePath = path.resolve(process.cwd(), 'lib/actions/coupons.ts');
+    const src = fs.readFileSync(filePath, 'utf8');
+    const rowMatch = /type\s+Row\s*=\s*\{([^}]+)\}/.exec(src);
+    expect(
+      rowMatch,
+      'expected `type Row = { … }` in lib/actions/coupons.ts',
+    ).not.toBeNull();
+    if (!rowMatch) return;
+    const consumed = Array.from(
+      rowMatch[1].matchAll(/([A-Za-z_][\w]*)\s*:/g),
+      (m) => m[1],
+    );
+    const migration = new Set(s.columns);
+    const unknown = consumed.filter((c) => !migration.has(c));
+    expect(
+      unknown,
+      `app reads columns the migration does not return: ${unknown.join(', ')}`,
+    ).toEqual([]);
+  });
+
   // ── Cross-call-site shape consistency ─────────────────────────────
 
   it('every CONSUMED table RPC has consistent destructure shapes across call sites', () => {
@@ -340,7 +376,8 @@ describe('supabase/ RPC round-trip extension (R44(a))', () => {
 
   // ── Sanity: SHAPES is non-empty ──────────────────────────────────
 
-  it('migration parser discovered at least 8 public RPCs', () => {
-    expect(SHAPES.size).toBeGreaterThanOrEqual(8);
+  it('migration parser discovered at least 9 public RPCs', () => {
+    // 2026-05-04 — bumped from 8 → 9 with redeem_coupon (0022_coupons.sql).
+    expect(SHAPES.size).toBeGreaterThanOrEqual(9);
   });
 });

@@ -65,6 +65,7 @@ const NO_CAPTURE_SCRIPTS = [
   'apply-migration.ts',
   'ingest-businesses.ts',
   'launch-readiness.ts',
+  'mint-coupons.ts', // 2026-05-04 — operator-run coupon mint CLI; same no-capture posture as other scripts.
   'patch-vapi-speaking-style.ts',
   'patch-vapi-tunnel-url.ts',
   'seed-csp-sample.ts',

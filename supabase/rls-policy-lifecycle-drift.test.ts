@@ -77,6 +77,9 @@ const NO_POLICIES_SERVICE_ROLE_ONLY = new Set<string>([
   'public.waitlist_signups',
   'public.vapi_phone_numbers',
   'public.csp_violations',
+  // 2026-05-04 — coupons table; redemption via redeem_coupon() SECURITY
+  // DEFINER RPC, mint via admin client in scripts/mint-coupons.ts.
+  'public.coupons',
 ]);
 
 // Any table permitted to use `force row level security`. Empty today

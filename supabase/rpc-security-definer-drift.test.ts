@@ -289,6 +289,9 @@ const EXPECTED_SECURITY_DEFINER_FUNCTIONS = [
   'public.is_admin',
   'public.pick_vapi_number',
   'public.recompute_business_success_rate',
+  // 2026-05-04 — redeem_coupon: SECURITY DEFINER set search_path = '',
+  // service_role-only execute grant (0022_coupons.sql).
+  'public.redeem_coupon',
   'private.trigger_cron_route',
 ];
 

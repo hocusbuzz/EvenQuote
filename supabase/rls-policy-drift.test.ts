@@ -463,6 +463,15 @@ const EXPECTED_RLS: Record<string, ExpectedTable> = {
     deliberateZeroPoliciesReason:
       'service-role-only; write path is /api/csp-report admin client (gated by CSP_VIOLATIONS_PERSIST), read path is scripts/analyze-csp-reports.ts (0009_csp_violations.sql).',
   },
+  // 2026-05-04 — coupons (admin-minted free-redemption codes); RLS on,
+  // no policies, redemption goes through redeem_coupon() SECURITY DEFINER
+  // RPC; service-role-only read/write surface (0022_coupons.sql).
+  'public.coupons': {
+    rlsEnabled: true,
+    policies: [],
+    deliberateZeroPoliciesReason:
+      'service-role-only; redemption via redeem_coupon() SECURITY DEFINER RPC, mint via scripts/mint-coupons.ts admin client (0022_coupons.sql).',
+  },
 };
 
 // Tables that must NEVER carry a client-facing write policy. Writes
@@ -479,6 +488,7 @@ const CLIENT_WRITE_FORBIDDEN_TABLES: string[] = [
   'public.waitlist_signups',
   'public.vapi_phone_numbers',
   'public.csp_violations',
+  'public.coupons', // 2026-05-04 — service-role-only via redeem_coupon RPC.
 ];
 
 // Special case: profiles allows `for update` (self update with WITH
